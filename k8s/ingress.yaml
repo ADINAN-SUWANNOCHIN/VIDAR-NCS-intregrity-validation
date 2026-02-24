@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vidar
+  namespace: default
+  annotations:
+    # Validation jobs can run for 30+ minutes on large tables
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+spec:
+  rules:
+    # TODO: Replace with actual hostname once confirmed with infra team
+    - host: PLACEHOLDER_HOSTNAME   # e.g. vidar.bam.co.th
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vidar
+                port:
+                  number: 80

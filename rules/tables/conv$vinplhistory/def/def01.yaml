@@ -1,0 +1,23 @@
+# ============================================================
+# DEF-01: Verify principal payment (PP) amount integrity
+#         after migration to ln$lnhistloantransactionhistory
+#
+# Trigger: group must have a PP (Principal Payment) row
+# Check  : sum of PP transactionamount in old must equal
+#          sum of PP transactionamount in new for same group
+# ============================================================
+
+def_id: def01
+target_scope: transaction_group
+
+trigger_condition:
+  must_have_all:
+    - PP
+
+actions:
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_pp: "SUM(old.transactionamount) WHERE affectcode == 'PP'"
+    condition: "target.transactionamount == val_pp AND target.affectcode == 'PP'"
+    error_message: "PP principal payment amount mismatch after migration for this transaction group"

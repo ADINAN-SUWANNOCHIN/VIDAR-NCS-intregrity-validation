@@ -1,0 +1,130 @@
+# ============================================================
+# Test Case 1: UNION (3 OLD → 1 NEW) + Transaction Grouping
+# conv$vinpahistory + conv$vinpalrentalhistory + conv$vinpalrtrespasserhist
+#   → la$lahistloantransactionhistory
+#
+# Row count check: 2,556,928 + 147 + 11 = 2,557,086 (exact match confirmed)
+#
+# Column notes (from real data inspection):
+#   - billno:   old="200811", new="20081121150000434" (billno+accountno CONCAT — skip for now)
+#   - noofdays: old="" nvarchar, new=null int — empty-string-vs-null edge case
+#   - startinterestdate/endinterestdate: old="" nvarchar, new=null datetime2 — same edge case
+#   - interestrate: old="" nvarchar (often empty), new=0 decimal — skip for now
+#   - Some columns only exist in conv$vinpahistory, not in all 3 source tables
+# ============================================================
+
+table_info:
+  # Comma-separated for UNION: all 3 source tables
+  source: "[ncs-conv-aging].dbo.[conv$vinpahistory],[ncs-conv-aging].dbo.[conv$vinpalrentalhistory],[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+  target: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+  table_type: UNION
+
+# Anchor key used for cursor-based (keyset) streaming — never OFFSET
+anchor_key:
+  old: newaccountno       # old system stores the new account number here
+  new: accountno
+
+# Transaction grouping: compare per systemreferencenumber group
+transaction_grouping:
+  keys:
+    old: systemreferencenumber
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01         # allow 0.01 rounding difference on decimal amounts
+
+schema_mappings:
+
+  # Direct 1:1 column matches (name may differ, data identical)
+  exact_matches:
+    - old: newaccountno
+      new: accountno
+
+    - old: auxilarytransactioncode
+      new: auxilarytranscode          # column renamed (shortened)
+
+    - old: loantransaction
+      new: loantranshostcode          # column renamed (verified: "20000" → "20000")
+
+    - old: affectcode
+      new: affectcode
+
+    - old: debitcredit
+      new: debitcredit
+
+    - old: tellerid
+      new: tellerid
+
+    - old: systemreferencenumber
+      new: systemreferenceno          # column renamed
+
+    - old: receiptnumber
+      new: receiptno                  # column renamed
+
+    - old: inputsourcesystem
+      new: channel                    # column renamed (verified: "TRF" → "TRF")
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+
+    - old: interestb4t
+      new: interestb4t
+
+    - old: planno
+      new: planno
+
+    - old: doctype
+      new: doctype
+
+    - old: remark
+      new: remark
+
+    - old: fixfloat
+      new: fixfloat
+
+    - old: receivetxnid
+      new: receivetxnid
+
+    - old: tempid
+      new: tempid
+
+    # NOTE: billno is excluded — old="200811", new="20081121150000434"
+    # (new billno = old billno + newaccountno CONCAT; needs custom transform)
+
+  # Amount columns: old = nvarchar ("5179.46"), new = decimal (5179.46)
+  # isEqual() uses parseFloat on both sides — tolerance 0.01 handles rounding
+  transformed_matches:
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+
+    - old: costnpaamountb4t
+      new: costnpaamountb4t
+      transform_rule: NONE
+
+    - old: unearnedprofitamountb4t
+      new: unearnedprofitamountb4t
+      transform_rule: NONE
+
+    # Date columns: old = "2008-11-30" (nvarchar), new = datetime2
+    # DATE_TO_DATETIME normalizes to YYYY-MM-DD for comparison
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: nextpaymentduedateb4t
+      new: nextpaymentduedateb4t
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    # NOTE: startinterestdate, endinterestdate excluded —
+    # old="" empty nvarchar vs new=null datetime2 (empty-string-vs-null edge case)
+    # NOTE: noofdays excluded — old="" nvarchar vs new=null int (same edge case)
+    # NOTE: interestrate excluded — old="" empty vs new=0 decimal (empty-as-zero edge case)
