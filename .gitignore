@@ -42,6 +42,9 @@ lerna-debug.log*
 .env.production.local
 .env.local
 
+# k8s secret with real credentials (never commit)
+k8s/secret.yaml
+
 # temp directory
 .temp
 .tmp

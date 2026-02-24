@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vidar
+  namespace: default
+  labels:
+    app: vidar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vidar
+  template:
+    metadata:
+      labels:
+        app: vidar
+    spec:
+      containers:
+        - name: vidar
+          image: 172.18.1.92:5050/bam-ncs-automation/vidar:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          # DB credentials from Secret
+          envFrom:
+            - secretRef:
+                name: vidar-db-secret
+          # Non-sensitive config
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: RULES_DIR
+              value: "/app/rules"
+            - name: REPORTS_DIR
+              value: "/app/reports"
+            - name: CHUNK_SIZE
+              value: "5000"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"    # 2 cores max
+              memory: "2Gi"   # worker threads need headroom
+          volumeMounts:
+            - name: reports
+              mountPath: /app/reports
+      # Pull from private GitLab registry
+      imagePullSecrets:
+        - name: gitlab-registry-secret
+      volumes:
+        - name: reports
+          emptyDir: {}

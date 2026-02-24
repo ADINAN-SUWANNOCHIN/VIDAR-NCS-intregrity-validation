@@ -1,0 +1,149 @@
+# ============================================================
+# Test Case 2: TRANSACTION (1 OLD → 1 NEW)
+# conv$vinplhistory → ln$lnhistloantransactionhistory
+#
+# ~15.9M rows — stream by transaction group (systemreferencenumber)
+#
+# Column notes (from real data inspection of ln$lnhistloantransactionhistory):
+#   - billno:           old="P-BAM-640205-1304" style, new same — exact match ✓
+#   - planno:           NOT present in ln$lnhistloantransactionhistory (skip)
+#   - interestrate:     old=".0525" nvarchar, new=0.0525 decimal — parseFloat handles it
+#   - noofdays:         old=nvarchar, new=int — exact match if values are numeric strings
+#   - startinterestdate/endinterestdate: old=ISO datetime string, new=datetime2
+#   - repayviatdr:      bit column present in both (ln$lnhist only)
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinplhistory]"
+  target: "[ncs-npl-aging].dbo.[ln$lnhistloantransactionhistory]"
+  table_type: TRANSACTION
+
+# Anchor key for keyset/cursor-based streaming
+anchor_key:
+  old: newaccountno       # old stores new-system account number
+  new: accountno
+
+# Group comparison by transaction reference number
+transaction_grouping:
+  keys:
+    old: systemreferencenumber
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+    - old: newaccountno
+      new: accountno
+
+    - old: auxilarytransactioncode
+      new: auxilarytranscode          # column renamed (shortened)
+
+    - old: loantransaction
+      new: loantranshostcode          # column renamed
+
+    - old: affectcode
+      new: affectcode
+
+    - old: debitcredit
+      new: debitcredit
+
+    - old: tellerid
+      new: tellerid
+
+    - old: systemreferencenumber
+      new: systemreferenceno          # renamed
+
+    - old: receiptnumber
+      new: receiptno                  # renamed
+
+    - old: inputsourcesystem
+      new: channel                    # renamed
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+
+    - old: interestb4t
+      new: interestb4t
+
+    - old: penaltyamountb4t
+      new: penaltyamountb4t
+
+    - old: lgo1flagb4law
+      new: lgo1flagb4law
+
+    - old: lgo1flag
+      new: lgo1flag
+
+    - old: lgo2flag
+      new: lgo2flag
+
+    - old: doctype
+      new: doctype
+
+    - old: remark
+      new: remark
+
+    - old: billno
+      new: billno
+
+    - old: fixfloat
+      new: fixfloat
+
+    - old: noofdays
+      new: noofdays
+
+    - old: repayviatdr
+      new: repayviatdr
+
+    - old: receivetxnid
+      new: receivetxnid
+
+    - old: tempid
+      new: tempid
+
+    # NOTE: planno is excluded — not present in ln$lnhistloantransactionhistory
+
+  transformed_matches:
+    # Amount columns: old = nvarchar, new = decimal
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+
+    - old: paymentamount
+      new: paymentamount
+      transform_rule: NONE
+
+    # Date columns: old = "2021-02-05T00:00:00.000+07:00" ISO string, new = datetime2
+    # DATE_TO_DATETIME normalizes to YYYY-MM-DD for comparison
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: interestpaymentduedateb4t
+      new: interestpaymentduedateb4t
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: startinterestdate
+      new: startinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: endinterestdate
+      new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    # Interest rate: old = ".0525" (leading dot, nvarchar), new = 0.0525 (decimal)
+    # parseFloat(".0525") = 0.0525 — isEqual handles the comparison correctly
+    - old: interestrate
+      new: interestrate
+      transform_rule: STRIP_LEADING_ZEROS

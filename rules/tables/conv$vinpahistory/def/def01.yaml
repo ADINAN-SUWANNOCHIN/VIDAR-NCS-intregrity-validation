@@ -1,0 +1,32 @@
+# ============================================================
+# DEF-01: Verify PP + QQ rows in the same transaction group
+#         migrated correctly into la$lahistloantransactionhistory
+#
+# Trigger: group must have both PP (Principal) and QQ (Interest)
+# Check  : new system must have a row where transactionamount
+#          matches the sum of PP + QQ from old system
+# ============================================================
+
+def_id: def01
+target_scope: transaction_group
+
+trigger_condition:
+  must_have_all:
+    - PP
+    - QQ
+
+actions:
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_pp: "SUM(old.transactionamount) WHERE affectcode == 'PP'"
+      val_qq: "SUM(old.transactionamount) WHERE affectcode == 'QQ'"
+    condition: "target.transactionamount == val_pp AND target.affectcode == 'PP'"
+    error_message: "PP principal amount in source does not match target for this transaction group"
+
+  - step: "2"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_qq: "SUM(old.transactionamount) WHERE affectcode == 'QQ'"
+    condition: "target.transactionamount == val_qq AND target.affectcode == 'QQ'"
+    error_message: "QQ interest accrual amount in source does not match target for this transaction group"

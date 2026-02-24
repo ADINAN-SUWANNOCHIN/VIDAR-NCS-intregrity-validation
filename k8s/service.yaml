@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vidar
+  namespace: default
+  labels:
+    app: vidar
+spec:
+  selector:
+    app: vidar
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+  type: ClusterIP

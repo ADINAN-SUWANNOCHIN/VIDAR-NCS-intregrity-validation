@@ -1,0 +1,76 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  IMAGE_LATEST: $CI_REGISTRY_IMAGE:latest
+  DOCKER_TLS_CERTDIR: ""
+
+# ============================================================
+# Stage 1 — TypeScript compile check (no real DB needed)
+# ============================================================
+test:
+  stage: test
+  image: node:20-alpine
+  cache:
+    key: $CI_COMMIT_REF_SLUG
+    paths:
+      - node_modules/
+  script:
+    - npm ci
+    - npm run build   # tsc compile — fails the pipeline if there are type errors
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ============================================================
+# Stage 2 — Build Docker image and push to GitLab registry
+# ============================================================
+build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build -t $IMAGE_TAG -t $IMAGE_LATEST .
+    - docker push $IMAGE_TAG
+    - docker push $IMAGE_LATEST
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ============================================================
+# Stage 3 — Deploy to on-prem k8s via GitLab Agent
+#
+# TODO (infra team):
+#   1. Register GitLab Agent in the cluster
+#   2. Replace PLACEHOLDER_AGENT_NAME below with the actual agent name
+#      Format: <gitlab-host>/<group>/<project>:<agent-name>
+#      Example: 172.18.1.92/bam-ncs-automation/vidar:bam-cluster
+# ============================================================
+deploy:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  environment:
+    name: production
+    kubernetes:
+      namespace: default
+  script:
+    # Connect to cluster via GitLab Agent tunnel
+    - kubectl config use-context 172.18.1.92/bam-ncs-automation/vidar:PLACEHOLDER_AGENT_NAME
+
+    # Apply all manifests (idempotent)
+    - kubectl apply -f k8s/
+
+    # Roll out new image
+    - kubectl set image deployment/vidar vidar=$IMAGE_TAG -n default
+
+    # Wait for rollout to complete (timeout 3 min)
+    - kubectl rollout status deployment/vidar -n default --timeout=180s
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
