@@ -22,8 +22,11 @@ export function generateYaml(input: YamlGeneratorInput): string {
   lines.push(`  target: "${newTable}"`);
   lines.push(`  table_type: ${tableType}`);
   lines.push(``);
+  const overlapNote = result.anchorOverlapPct !== null
+    ? `  # AUTO-DETECTED — ${result.anchorOverlapPct}% value overlap — verify before use`
+    : `  # AUTO-DETECTED — verify before use`;
   lines.push(`anchor_key:`);
-  lines.push(`  old: ${anchorOld ?? 'UNKNOWN'}   # AUTO-DETECTED — verify before use`);
+  lines.push(`  old: ${anchorOld ?? 'UNKNOWN'}   ${overlapNote}`);
   lines.push(`  new: ${anchorNew ?? 'UNKNOWN'}`);
   lines.push(``);
   lines.push(`schema_mappings:`);
@@ -91,6 +94,29 @@ export function generateYaml(input: YamlGeneratorInput): string {
       if (m.transformHint !== 'NONE') {
         lines.push(`  #   transform_rule: ${m.transformHint}  # hint only`);
       }
+    }
+  }
+
+  // ---- SAME_NAME_DIFF_DATA (omitted from mappings, explained in comment) ----
+  const sameNameDiff = matches.filter((m) => m.status === 'SAME_NAME_DIFF_DATA');
+  if (sameNameDiff.length > 0) {
+    lines.push(``);
+    lines.push(`  # SAME_NAME_DIFF_DATA — column name matches but data has zero overlap.`);
+    lines.push(`  # This usually means the field was renumbered/re-keyed during migration.`);
+    lines.push(`  # DO NOT map these directly — investigate the business logic first:`);
+    for (const m of sameNameDiff) {
+      lines.push(`  #   ${m.oldCol.name} (old format: ${m.oldCol.sampleValues[0] ?? 'n/a'}) → ${m.newCol?.name ?? 'no candidate'} (new format: ${m.newCol?.sampleValues[0] ?? 'n/a'})`);
+    }
+  }
+
+  // ---- REGENERATED_ID ----
+  const regeneratedIds = matches.filter((m) => m.status === 'REGENERATED_ID');
+  if (regeneratedIds.length > 0) {
+    lines.push(``);
+    lines.push(`  # REGENERATED_ID — system-generated primary key (id column).`);
+    lines.push(`  # Old and new IDs are from different sequences — do not map:`);
+    for (const m of regeneratedIds) {
+      lines.push(`  #   ${m.oldCol.name}: old=${m.oldCol.sampleValues[0] ?? 'n/a'}`);
     }
   }
 

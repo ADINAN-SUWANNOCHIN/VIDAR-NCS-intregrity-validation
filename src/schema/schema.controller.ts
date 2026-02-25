@@ -55,7 +55,7 @@ export class SchemaController {
 
     res.status(HttpStatus.OK);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"; filename*=UTF-8''${encodeURIComponent(result.filename)}`);
     res.setHeader('X-Summary-Total',       String(result.summary.totalOldCols));
     res.setHeader('X-Summary-Matched',     String(result.summary.matched));
     res.setHeader('X-Summary-Unmatched',   String(result.summary.unmatched));
