@@ -1,0 +1,6 @@
+Error Type,Def ID,Group Key,Row ID,Old Column,New Column,Old Value,New Value,Message
+COLUMN_MISSING,,,,auxilarytransactioncode,,,,Column [auxilarytransactioncode] not found in source table [[ncs-conv-aging].dbo.[conv$vinplhistory]]
+COLUMN_MISSING,,,,loantransaction,,,,Column [loantransaction] not found in source table [[ncs-conv-aging].dbo.[conv$vinplhistory]]
+VALUE_MISMATCH,,,,SUM(transactionamount) WHERE affectcode='I1',SUM(transactionamount) WHERE affectcode='I1',2960890817748.3394,2960890817748.189,"[AGGREGATE] SUM mismatch for affectcode=I1: old=2960890817748.34, new=2960890817748.19, diff=0.15"
+VALUE_MISMATCH,,,,SUM(transactionamount) WHERE affectcode='IN',SUM(transactionamount) WHERE affectcode='IN',2674578944919.914,2674578944919.955,"[AGGREGATE] SUM mismatch for affectcode=IN: old=2674578944919.91, new=2674578944919.96, diff=0.04"
+VALUE_MISMATCH,,,,SUM(transactionamount) WHERE affectcode='PP',SUM(transactionamount) WHERE affectcode='PP',1697256820973.1943,1697256820973.0813,"[AGGREGATE] SUM mismatch for affectcode=PP: old=1697256820973.19, new=1697256820973.08, diff=0.11"
