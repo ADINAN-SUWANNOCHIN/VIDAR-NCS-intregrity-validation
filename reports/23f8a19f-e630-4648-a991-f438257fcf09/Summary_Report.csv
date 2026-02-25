@@ -1,0 +1,2 @@
+Table Name,Rows Checked,Total Errors,Pass,Fail,Missing,Time Spent (sec),Status
+conv$vinplhistory,0,5,0,3,2,31.19,FAIL

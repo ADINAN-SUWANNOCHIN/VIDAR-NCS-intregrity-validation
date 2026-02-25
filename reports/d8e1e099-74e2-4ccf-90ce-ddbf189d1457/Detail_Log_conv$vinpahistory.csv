@@ -1,0 +1,2 @@
+Error Type,Def ID,Group Key,Row ID,Old Column,New Column,Old Value,New Value,Message
+TRANSFORM_ERROR,,,,,,,,Runtime error: Incorrect syntax near the keyword 'IS'.
