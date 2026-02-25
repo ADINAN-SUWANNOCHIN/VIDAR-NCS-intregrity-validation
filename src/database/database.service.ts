@@ -83,6 +83,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   /**
    * Stream แถวทั้งหมดของกลุ่ม keys ที่กำหนด
    * callback รับ row ทีละแถวเพื่อลด memory
+   *
+   * SQL Server จำกัด parameters ต่อ query ที่ 2100 ดังนั้นถ้า keys มีมากกว่า 2000
+   * จะแตก batch แล้ว query ทีละ batch แทน
    */
   async streamRowsByKeys(
     table: string,
@@ -92,20 +95,25 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     if (keys.length === 0) return;
 
-    const request = this.pool.request();
-    request.stream = true;
+    const BATCH_SIZE = 2000;
+    for (let i = 0; i < keys.length; i += BATCH_SIZE) {
+      const batch = keys.slice(i, i + BATCH_SIZE);
 
-    // Parameterize key list เพื่อป้องกัน SQL injection
-    const placeholders = keys.map((_, i) => `@k${i}`).join(',');
-    keys.forEach((k, i) => request.input(`k${i}`, k));
+      const request = this.pool.request();
+      request.stream = true;
 
-    request.query(`SELECT * FROM ${tableRef(table)} WITH (NOLOCK) WHERE [${keyColumn}] IN (${placeholders})`);
+      // Parameterize key list เพื่อป้องกัน SQL injection
+      const placeholders = batch.map((_, j) => `@k${j}`).join(',');
+      batch.forEach((k, j) => request.input(`k${j}`, k));
 
-    return new Promise((resolve, reject) => {
-      request.on('row', callback);
-      request.on('error', reject);
-      request.on('done', resolve);
-    });
+      request.query(`SELECT * FROM ${tableRef(table)} WITH (NOLOCK) WHERE [${keyColumn}] IN (${placeholders})`);
+
+      await new Promise<void>((resolve, reject) => {
+        request.on('row', callback);
+        request.on('error', reject);
+        request.on('done', resolve);
+      });
+    }
   }
 
   /**
