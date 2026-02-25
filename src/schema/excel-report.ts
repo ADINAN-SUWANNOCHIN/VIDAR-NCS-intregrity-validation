@@ -12,16 +12,20 @@ const COLORS = {
   headerGray:   { argb: 'FF595959' },
   white:        { argb: 'FFFFFFFF' },
 
-  verifiedFill:     { argb: 'FFC6EFCE' },
-  verifiedFont:     { argb: 'FF006100' },
-  probableFill:     { argb: 'FFDDEBF7' },
-  probableFont:     { argb: 'FF1F4E79' },
-  manualFill:       { argb: 'FFFFEB9C' },
-  manualFont:       { argb: 'FF9C5700' },
-  noMatchFill:      { argb: 'FFFFC7CE' },
-  noMatchFont:      { argb: 'FF9C0006' },
-  noisyFill:        { argb: 'FFD9D9D9' },
-  noisyFont:        { argb: 'FF000000' },
+  verifiedFill:       { argb: 'FFC6EFCE' },
+  verifiedFont:       { argb: 'FF006100' },
+  probableFill:       { argb: 'FFDDEBF7' },
+  probableFont:       { argb: 'FF1F4E79' },
+  manualFill:         { argb: 'FFFFEB9C' },
+  manualFont:         { argb: 'FF9C5700' },
+  noMatchFill:        { argb: 'FFFFC7CE' },
+  noMatchFont:        { argb: 'FF9C0006' },
+  noisyFill:          { argb: 'FFD9D9D9' },
+  noisyFont:          { argb: 'FF000000' },
+  sameNameDiffFill:   { argb: 'FFFFCCFF' },   // light purple — same name, different data
+  sameNameDiffFont:   { argb: 'FF7B2C9B' },
+  regeneratedIdFill:  { argb: 'FFFFE0CC' },   // light orange — ID regenerated
+  regeneratedIdFont:  { argb: 'FF7F3F00' },
 };
 
 function statusFill(status: MatchStatus): { fill: ExcelJS.FillPattern; fontColor: { argb: string } } {
@@ -34,6 +38,10 @@ function statusFill(status: MatchStatus): { fill: ExcelJS.FillPattern; fontColor
       return { fill: { type: 'pattern', pattern: 'solid', fgColor: COLORS.manualFill }, fontColor: COLORS.manualFont };
     case 'NO_MATCH':
       return { fill: { type: 'pattern', pattern: 'solid', fgColor: COLORS.noMatchFill }, fontColor: COLORS.noMatchFont };
+    case 'SAME_NAME_DIFF_DATA':
+      return { fill: { type: 'pattern', pattern: 'solid', fgColor: COLORS.sameNameDiffFill }, fontColor: COLORS.sameNameDiffFont };
+    case 'REGENERATED_ID':
+      return { fill: { type: 'pattern', pattern: 'solid', fgColor: COLORS.regeneratedIdFill }, fontColor: COLORS.regeneratedIdFont };
     default: // NULL_COLUMN / ZERO_COLUMN / BOOLEAN_COLUMN
       return { fill: { type: 'pattern', pattern: 'solid', fgColor: COLORS.noisyFill }, fontColor: COLORS.noisyFont };
   }
@@ -142,7 +150,7 @@ export interface ExcelReportInput {
 
 export async function writeExcelReport(input: ExcelReportInput): Promise<Buffer> {
   const { oldTable, newTable, tableType, sampleSize, result, yamlContent } = input;
-  const { matches, anchorOld, anchorNew, unmatchedNew } = result;
+  const { matches, anchorOld, anchorNew, anchorOverlapPct, unmatchedNew } = result;
 
   const wb = new ExcelJS.Workbook();
   wb.creator = 'DV Schema Analyzer';
@@ -240,27 +248,35 @@ export async function writeExcelReport(input: ExcelReportInput): Promise<Buffer>
   s4.getColumn(1).width = 26;
   s4.getColumn(2).width = 45;
 
-  const verified = matches.filter((m) => m.status === 'VERIFIED').length;
-  const probable = matches.filter((m) => m.status === 'PROBABLE').length;
-  const manual   = matches.filter((m) => m.status === 'MANUAL_CHECK').length;
-  const noMatch  = matches.filter((m) => m.status === 'NO_MATCH').length;
+  const verified       = matches.filter((m) => m.status === 'VERIFIED').length;
+  const probable       = matches.filter((m) => m.status === 'PROBABLE').length;
+  const manual         = matches.filter((m) => m.status === 'MANUAL_CHECK').length;
+  const noMatch        = matches.filter((m) => m.status === 'NO_MATCH').length;
+  const sameNameDiff   = matches.filter((m) => m.status === 'SAME_NAME_DIFF_DATA').length;
+  const regeneratedId  = matches.filter((m) => m.status === 'REGENERATED_ID').length;
+  const noisy          = matches.filter((m) => ['NULL_COLUMN','ZERO_COLUMN','BOOLEAN_COLUMN'].includes(m.status)).length;
+
+  const anchorLabel = anchorOld && anchorNew
+    ? `${anchorOld} → ${anchorNew}${anchorOverlapPct !== null ? ` (${anchorOverlapPct}% value overlap)` : ''}`
+    : '(not detected)';
 
   const summaryRows: [string, string | number][] = [
-    ['Old table',        oldTable],
-    ['New table',        newTable],
-    ['Table type',       tableType],
-    ['Sample size',      sampleSize],
-    ['Generated at',     new Date().toISOString()],
+    ['Old table',              oldTable],
+    ['New table',              newTable],
+    ['Table type',             tableType],
+    ['Sample size',            sampleSize],
+    ['Generated at',           new Date().toISOString()],
     ['', ''],
-    ['Total old cols',   matches.length],
-    ['VERIFIED',         verified],
-    ['PROBABLE',         probable],
-    ['MANUAL_CHECK',     manual],
-    ['NO_MATCH',         noMatch],
-    ['Noisy (skip)',     matches.length - verified - probable - manual - noMatch],
+    ['Total old cols',         matches.length],
+    ['VERIFIED',               verified],
+    ['PROBABLE',               probable],
+    ['MANUAL_CHECK',           manual],
+    ['NO_MATCH',               noMatch],
+    ['SAME_NAME_DIFF_DATA',    sameNameDiff],
+    ['REGENERATED_ID',         regeneratedId],
+    ['Noisy (skip)',            noisy],
     ['', ''],
-    ['Anchor key (old)', anchorOld ?? '(not detected)'],
-    ['Anchor key (new)', anchorNew ?? '(not detected)'],
+    ['Anchor key detected',    anchorLabel],
   ];
 
   for (const [label, value] of summaryRows) {
@@ -290,5 +306,5 @@ export async function writeExcelReport(input: ExcelReportInput): Promise<Buffer>
   // ----------------------------------------------------------------
 
   const raw = await wb.xlsx.writeBuffer();
-  return Buffer.from(raw as ArrayBuffer);
+  return Buffer.from(raw);
 }

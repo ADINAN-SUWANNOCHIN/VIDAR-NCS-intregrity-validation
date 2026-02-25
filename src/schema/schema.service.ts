@@ -60,7 +60,8 @@ export class SchemaService {
 
     // Derive filename from old table's last segment
     const simpleTableName = this.simpleTableName(oldTable);
-    const filename = `${simpleTableName}_common01.xlsx`;
+    const safeTableName = simpleTableName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const filename = `${safeTableName}_common01.xlsx`;
 
     this.logger.log(`Report generated: ${filename}`);
 
