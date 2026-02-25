@@ -62,6 +62,8 @@ export class TransactionStrategy extends BaseStrategy {
     const allOldCols = [
       ...(sm.exact_matches ?? []).map((m) => m.old),
       ...(sm.split_matches ?? []).map((m) => m.old),
+      ...(sm.transformed_matches ?? []).map((m) => m.old),
+      ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
     ];
     const noisyMap = await this.detectNoisyColumns(source, allOldCols);
     for (const [col, type] of noisyMap) {
@@ -197,6 +199,43 @@ export class TransactionStrategy extends BaseStrategy {
       }
     }
 
+    for (const mapping of sm.transformed_matches ?? []) {
+      if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
+      const oldVal = oldGroup[0]?.[mapping.old];
+      const newVal = newGroup[0]?.[mapping.new];
+      const transformedOld = TransformUtils.apply(oldVal, mapping.transform_rule);
+      const transformedNew = TransformUtils.apply(newVal, 'NONE');
+      if (!TransformUtils.isEqual(transformedOld, transformedNew, tolerance)) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: mapping.old,
+          newColumn: mapping.new,
+          oldValue: oldVal,
+          newValue: newVal,
+          groupKey,
+          message: `[TXN] Transform mismatch [${mapping.old}→${mapping.new}]: "${transformedOld}" ≠ "${transformedNew}" (group: ${groupKey})`,
+        });
+      }
+    }
+
+    for (const mapping of sm.concat_matches ?? []) {
+      if (mapping.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
+      const sep = mapping.separator ?? '';
+      const concatenated = mapping.old_cols.map((c) => String(oldGroup[0]?.[c] ?? '').trim()).join(sep);
+      const newVal = String(newGroup[0]?.[mapping.new] ?? '').trim();
+      if (!TransformUtils.isEqual(concatenated, newVal, tolerance)) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: mapping.old_cols.join('+'),
+          newColumn: mapping.new,
+          oldValue: concatenated,
+          newValue: newVal,
+          groupKey,
+          message: `[TXN] Concat mismatch [${mapping.old_cols.join('+')}→${mapping.new}]: "${concatenated}" ≠ "${newVal}" (group: ${groupKey})`,
+        });
+      }
+    }
+
     return errors;
   }
 
@@ -216,6 +255,14 @@ export class TransactionStrategy extends BaseStrategy {
           oldAffectCodes.has(code),
         );
         if (!hasAll) continue;
+      }
+
+      if (def.trigger_condition?.must_have_any) {
+        const oldAffectCodes = this.extractAffectCodes(oldGroup, affectCodeMap);
+        const hasAny = def.trigger_condition.must_have_any.some((code) =>
+          oldAffectCodes.has(code),
+        );
+        if (!hasAny) continue;
       }
 
       for (const action of def.actions) {
