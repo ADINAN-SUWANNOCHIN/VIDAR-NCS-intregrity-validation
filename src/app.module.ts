@@ -10,6 +10,8 @@ import { StrategyFactory } from './strategies/strategy.factory';
 import { WorkerPoolService } from './strategies/worker-pool.service';
 import { ValidationService } from './validation/validation.service';
 import { ValidationController } from './validation/validation.controller';
+import { SchemaController } from './schema/schema.controller';
+import { SchemaService } from './schema/schema.service';
 
 @Module({
   imports: [
@@ -18,7 +20,7 @@ import { ValidationController } from './validation/validation.controller';
       envFilePath: '.env',
     }),
   ],
-  controllers: [AppController, ValidationController],
+  controllers: [AppController, ValidationController, SchemaController],
   providers: [
     AppService,
     DatabaseService,
@@ -28,6 +30,7 @@ import { ValidationController } from './validation/validation.controller';
     WorkerPoolService,
     StrategyFactory,
     ValidationService,
+    SchemaService,
   ],
 })
 export class AppModule {}
