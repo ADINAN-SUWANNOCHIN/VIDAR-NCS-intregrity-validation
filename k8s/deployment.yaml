@@ -35,6 +35,8 @@ spec:
               value: "/app/reports"
             - name: CHUNK_SIZE
               value: "5000"
+            - name: JWT_EXPIRES_IN
+              value: "8h"
           resources:
             requests:
               cpu: "500m"
