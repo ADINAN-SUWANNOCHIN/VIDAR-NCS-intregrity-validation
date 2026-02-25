@@ -51,7 +51,18 @@ export class MasterStrategy extends BaseStrategy {
       return { errors, rowsChecked: 0 };
     }
 
-    // ---- 2. Row count check ----
+    // ---- 2. Anchor key uniqueness check ----
+    // Duplicate anchor keys break keyset pagination (rows get silently skipped).
+    // Check both sides: source drives the stream, target is used as a Map key in the worker.
+    for (const [tbl, key] of [[source, anchorKeyOld], [target, anchorKeyNew]] as [string, string][]) {
+      const anchorErr = await this.checkAnchorKeyUnique(tbl, key);
+      if (anchorErr) {
+        errors.push(anchorErr);
+        this.logger.warn(`[MASTER] ${anchorErr.message}`);
+      }
+    }
+
+    // ---- 3. Row count check ----
     const [oldCount, newCount] = await Promise.all([
       this.db.query<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM ${tableRef(source)}`),
       this.db.query<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM ${tableRef(target)}`),

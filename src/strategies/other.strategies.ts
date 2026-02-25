@@ -277,12 +277,79 @@ export class UnionStrategy extends BaseStrategy {
       }
     }
 
-    // ---- Anchor-key streaming (Issue #2) ----
+    // ---- Anchor key uniqueness check — one per source table ----
+    for (const src of sources) {
+      const anchorDupErr = await this.checkAnchorKeyUnique(src, anchorKeyOld);
+      if (anchorDupErr) {
+        errors.push(anchorDupErr);
+        this.logger.warn(`[UNION] ${anchorDupErr.message}`);
+      }
+    }
+
+    // Inner helper: compare a fully-assembled group (reused by main loop and carry-flush)
+    const compareUnionGroup = (
+      src: string,
+      groupKey: string,
+      oldGroup: Record<string, unknown>[],
+      newGroup: Record<string, unknown>[],
+    ): void => {
+      if (newGroup.length === 0) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `[UNION] Transaction group [${groupKey}] from ${src} not found in target`,
+        });
+        return;
+      }
+
+      for (const mapping of sm.exact_matches ?? []) {
+        if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
+        const oldTotal = this.sumOrFirst(oldGroup, mapping.old);
+        const newTotal = this.sumOrFirst(newGroup, mapping.new);
+        if (oldTotal !== null && newTotal !== null) {
+          if (!TransformUtils.isEqual(oldTotal, newTotal, tolerance)) {
+            errors.push({
+              errorType: 'VALUE_MISMATCH',
+              oldColumn: mapping.old,
+              newColumn: mapping.new,
+              oldValue: oldTotal,
+              newValue: newTotal,
+              groupKey,
+              message: `[UNION] Group mismatch [${mapping.old}→${mapping.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
+            });
+          }
+        }
+      }
+
+      for (const mapping of sm.transformed_matches ?? []) {
+        if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
+        const oldVal = oldGroup[0]?.[mapping.old];
+        const newVal = newGroup[0]?.[mapping.new];
+        const transformedOld = TransformUtils.apply(oldVal, mapping.transform_rule);
+        const transformedNew = TransformUtils.apply(newVal, 'NONE');
+        if (!TransformUtils.isEqual(transformedOld, transformedNew, tolerance)) {
+          errors.push({
+            errorType: 'VALUE_MISMATCH',
+            oldColumn: mapping.old,
+            newColumn: mapping.new,
+            oldValue: oldVal,
+            newValue: newVal,
+            groupKey,
+            message: `[UNION] Transform mismatch [${mapping.old}→${mapping.new}]: "${transformedOld}" ≠ "${transformedNew}" (group: ${groupKey})`,
+          });
+        }
+      }
+    };
+
+    // ---- Anchor-key streaming with carry-over ----
     // Stream each source by anchorKey → fetch matching target rows → group by groupKey in memory.
-    // This eliminates the need for any index on the groupKey column.
+    // Carry-over: if the last group in a chunk might continue in the next chunk, hold it back
+    // and merge it before comparing. This prevents wrong group-level sums at chunk boundaries.
     for (const src of sources) {
       this.logger.log(`[UNION] Processing source: ${src}`);
       let lastAnchorKey: unknown = null;
+      let carryOld = new Map<string, Record<string, unknown>[]>();
+      let carryNew = new Map<string, Record<string, unknown>[]>();
 
       while (true) {
         const oldChunk = await this.db.fetchChunk(src, anchorKeyOld, chunkSize, lastAnchorKey);
@@ -295,9 +362,11 @@ export class UnionStrategy extends BaseStrategy {
         const newRows: Record<string, unknown>[] = [];
         await this.db.streamRowsByKeys(target, anchorKeyNew, anchorVals, (row) => newRows.push(row));
 
-        // Group both sides by groupKey in memory
-        const oldGroupMap = new Map<string, Record<string, unknown>[]>();
-        const newGroupMap = new Map<string, Record<string, unknown>[]>();
+        // Seed group maps with carry-over from previous chunk
+        const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
+        const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
+        carryOld = new Map();
+        carryNew = new Map();
 
         for (const row of oldChunk) {
           const key = String(row[oldKeyCol] ?? '').trim();
@@ -311,63 +380,28 @@ export class UnionStrategy extends BaseStrategy {
           newGroupMap.get(key)!.push(row);
         }
 
-        // Compare each group
-        for (const [groupKey, oldGroup] of oldGroupMap) {
-          const newGroup = newGroupMap.get(groupKey) ?? [];
+        const isLastChunk = oldChunk.length < chunkSize;
 
-          if (newGroup.length === 0) {
-            errors.push({
-              errorType: 'ROW_MISSING',
-              groupKey,
-              message: `[UNION] Transaction group [${groupKey}] from ${src} not found in target`,
-            });
-            continue;
-          }
-
-          for (const mapping of sm.exact_matches ?? []) {
-            if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
-            const oldTotal = this.sumOrFirst(oldGroup, mapping.old);
-            const newTotal = this.sumOrFirst(newGroup, mapping.new);
-            if (oldTotal !== null && newTotal !== null) {
-              if (!TransformUtils.isEqual(oldTotal, newTotal, tolerance)) {
-                errors.push({
-                  errorType: 'VALUE_MISMATCH',
-                  oldColumn: mapping.old,
-                  newColumn: mapping.new,
-                  oldValue: oldTotal,
-                  newValue: newTotal,
-                  groupKey,
-                  message: `[UNION] Group mismatch [${mapping.old}→${mapping.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
-                });
-              }
-            }
-          }
-
-          for (const mapping of sm.transformed_matches ?? []) {
-            if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
-            const oldVal = oldGroup[0]?.[mapping.old];
-            const newVal = newGroup[0]?.[mapping.new];
-            const transformedOld = TransformUtils.apply(oldVal, mapping.transform_rule);
-            const transformedNew = TransformUtils.apply(newVal, 'NONE');
-            if (!TransformUtils.isEqual(transformedOld, transformedNew, tolerance)) {
-              errors.push({
-                errorType: 'VALUE_MISMATCH',
-                oldColumn: mapping.old,
-                newColumn: mapping.new,
-                oldValue: oldVal,
-                newValue: newVal,
-                groupKey,
-                message: `[UNION] Transform mismatch [${mapping.old}→${mapping.new}]: "${transformedOld}" ≠ "${transformedNew}" (group: ${groupKey})`,
-              });
-            }
-          }
+        // Hold back the last group if more chunks may follow
+        const carryKey = !isLastChunk ? [...oldGroupMap.keys()].at(-1) : undefined;
+        if (carryKey) {
+          carryOld.set(carryKey, oldGroupMap.get(carryKey)!);
+          if (newGroupMap.has(carryKey)) carryNew.set(carryKey, newGroupMap.get(carryKey)!);
         }
 
-        oldGroupMap.clear();
-        newGroupMap.clear();
+        // Compare all committed groups
+        for (const [groupKey, oldGroup] of oldGroupMap) {
+          if (groupKey === carryKey) continue;
+          compareUnionGroup(src, groupKey, oldGroup, newGroupMap.get(groupKey) ?? []);
+        }
 
         lastAnchorKey = oldChunk[oldChunk.length - 1][anchorKeyOld];
-        if (oldChunk.length < chunkSize) break;
+        if (isLastChunk) break;
+      }
+
+      // Flush remaining carry for this source
+      for (const [groupKey, oldGroup] of carryOld) {
+        compareUnionGroup(src, groupKey, oldGroup, carryNew.get(groupKey) ?? []);
       }
     }
 

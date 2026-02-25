@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { DatabaseService } from '../database/database.service';
+import { DatabaseService, tableRef } from '../database/database.service';
 import { CommonRule, DefRule, NoisyColumnType, SchemaMappings, ValidationError } from '../rules/rule.types';
 import { TransformUtils } from './transform.utils';
 
@@ -203,5 +203,41 @@ export abstract class BaseStrategy {
     }
 
     return matches;
+  }
+
+  // ----------------------------------------------------------------
+  // Anchor key uniqueness
+  // ----------------------------------------------------------------
+
+  /**
+   * Checks that anchorKey has no duplicate values in the given table.
+   * Duplicate anchor keys break keyset pagination — rows are silently skipped.
+   * Uses TOP 1 … HAVING COUNT(*) > 1 so it short-circuits on the first duplicate found.
+   * Returns a TRANSFORM_ERROR if duplicates exist, null if clean, null if the check fails.
+   */
+  protected async checkAnchorKeyUnique(
+    table: string,
+    anchorKey: string,
+  ): Promise<ValidationError | null> {
+    try {
+      const rows = await this.db.query<{ dupe_key: unknown }>(
+        `SELECT TOP 1 [${anchorKey}] as dupe_key
+         FROM ${tableRef(table)}
+         GROUP BY [${anchorKey}]
+         HAVING COUNT(*) > 1`,
+      );
+      if (rows.length > 0) {
+        return {
+          errorType: 'TRANSFORM_ERROR',
+          message:
+            `Anchor key [${anchorKey}] has duplicate values in [${table}] ` +
+            `(first duplicate: "${rows[0].dupe_key}") — keyset streaming may skip rows, results unreliable`,
+        };
+      }
+      return null;
+    } catch {
+      // Silently skip if the check itself fails (e.g. cross-db permission issues)
+      return null;
+    }
   }
 }
