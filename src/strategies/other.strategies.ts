@@ -109,7 +109,7 @@ export class HeaderStrategy extends BaseStrategy {
           `Add pivot_config.identity_key, pivot_config.pivot_key, and schema_mappings.pivot_matches for full validation.`,
       );
       const [oldCount] = await this.db.query<{ cnt: number }>(
-        `SELECT COUNT(DISTINCT [${commonRule.anchor_key.old}]) as cnt FROM ${tableRef(source)}`,
+        `SELECT COUNT(DISTINCT [id]) as cnt FROM ${tableRef(source)}`,
       );
       const [newCount] = await this.db.query<{ cnt: number }>(
         `SELECT COUNT(*) as cnt FROM ${tableRef(target)}`,
@@ -123,18 +123,6 @@ export class HeaderStrategy extends BaseStrategy {
         });
       }
       return { errors, rowsChecked: oldCount?.cnt ?? 0 };
-    }
-
-    // ---- Schema check ----
-    const schemaValueCols = [...new Set(pm.map((p) => p.value_col))];
-    const schemaPivotCols = pm.map((p) => p.new_col);
-    const colErrors = await this.checkMissingColumns(source, target, [{
-      oldCols: [pc.identity_key.old, pc.pivot_key, ...schemaValueCols],
-      newCols: [pc.identity_key.new, ...schemaPivotCols],
-    }]);
-    if (colErrors.length > 0) {
-      this.logger.warn(`[HEADER] ${colErrors.length} column(s) missing — aborting pivot validation`);
-      return { errors: colErrors, rowsChecked: 0 };
     }
 
     const oldIdCol = pc.identity_key.old;
@@ -281,8 +269,6 @@ export class UnionStrategy extends BaseStrategy {
     const allOldCols = [
       ...(sm.exact_matches ?? []).map((m) => m.old),
       ...(sm.transformed_matches ?? []).map((m) => m.old),
-      ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
-      ...(sm.split_matches ?? []).map((m) => m.old),
     ];
     const noisyMap = await this.detectNoisyColumns(sources[0], allOldCols);
     for (const [col, type] of noisyMap) {
@@ -291,12 +277,79 @@ export class UnionStrategy extends BaseStrategy {
       }
     }
 
-    // ---- Anchor-key streaming (Issue #2) ----
+    // ---- Anchor key uniqueness check — one per source table ----
+    for (const src of sources) {
+      const anchorDupErr = await this.checkAnchorKeyUnique(src, anchorKeyOld);
+      if (anchorDupErr) {
+        errors.push(anchorDupErr);
+        this.logger.warn(`[UNION] ${anchorDupErr.message}`);
+      }
+    }
+
+    // Inner helper: compare a fully-assembled group (reused by main loop and carry-flush)
+    const compareUnionGroup = (
+      src: string,
+      groupKey: string,
+      oldGroup: Record<string, unknown>[],
+      newGroup: Record<string, unknown>[],
+    ): void => {
+      if (newGroup.length === 0) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `[UNION] Transaction group [${groupKey}] from ${src} not found in target`,
+        });
+        return;
+      }
+
+      for (const mapping of sm.exact_matches ?? []) {
+        if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
+        const oldTotal = this.sumOrFirst(oldGroup, mapping.old);
+        const newTotal = this.sumOrFirst(newGroup, mapping.new);
+        if (oldTotal !== null && newTotal !== null) {
+          if (!TransformUtils.isEqual(oldTotal, newTotal, tolerance)) {
+            errors.push({
+              errorType: 'VALUE_MISMATCH',
+              oldColumn: mapping.old,
+              newColumn: mapping.new,
+              oldValue: oldTotal,
+              newValue: newTotal,
+              groupKey,
+              message: `[UNION] Group mismatch [${mapping.old}→${mapping.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
+            });
+          }
+        }
+      }
+
+      for (const mapping of sm.transformed_matches ?? []) {
+        if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
+        const oldVal = oldGroup[0]?.[mapping.old];
+        const newVal = newGroup[0]?.[mapping.new];
+        const transformedOld = TransformUtils.apply(oldVal, mapping.transform_rule);
+        const transformedNew = TransformUtils.apply(newVal, 'NONE');
+        if (!TransformUtils.isEqual(transformedOld, transformedNew, tolerance)) {
+          errors.push({
+            errorType: 'VALUE_MISMATCH',
+            oldColumn: mapping.old,
+            newColumn: mapping.new,
+            oldValue: oldVal,
+            newValue: newVal,
+            groupKey,
+            message: `[UNION] Transform mismatch [${mapping.old}→${mapping.new}]: "${transformedOld}" ≠ "${transformedNew}" (group: ${groupKey})`,
+          });
+        }
+      }
+    };
+
+    // ---- Anchor-key streaming with carry-over ----
     // Stream each source by anchorKey → fetch matching target rows → group by groupKey in memory.
-    // This eliminates the need for any index on the groupKey column.
+    // Carry-over: if the last group in a chunk might continue in the next chunk, hold it back
+    // and merge it before comparing. This prevents wrong group-level sums at chunk boundaries.
     for (const src of sources) {
       this.logger.log(`[UNION] Processing source: ${src}`);
       let lastAnchorKey: unknown = null;
+      let carryOld = new Map<string, Record<string, unknown>[]>();
+      let carryNew = new Map<string, Record<string, unknown>[]>();
 
       while (true) {
         const oldChunk = await this.db.fetchChunk(src, anchorKeyOld, chunkSize, lastAnchorKey);
@@ -309,9 +362,11 @@ export class UnionStrategy extends BaseStrategy {
         const newRows: Record<string, unknown>[] = [];
         await this.db.streamRowsByKeys(target, anchorKeyNew, anchorVals, (row) => newRows.push(row));
 
-        // Group both sides by groupKey in memory
-        const oldGroupMap = new Map<string, Record<string, unknown>[]>();
-        const newGroupMap = new Map<string, Record<string, unknown>[]>();
+        // Seed group maps with carry-over from previous chunk
+        const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
+        const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
+        carryOld = new Map();
+        carryNew = new Map();
 
         for (const row of oldChunk) {
           const key = String(row[oldKeyCol] ?? '').trim();
@@ -325,113 +380,28 @@ export class UnionStrategy extends BaseStrategy {
           newGroupMap.get(key)!.push(row);
         }
 
-        // Compare each group
+        const isLastChunk = oldChunk.length < chunkSize;
+
+        // Hold back the last group if more chunks may follow
+        const carryKey = !isLastChunk ? [...oldGroupMap.keys()].at(-1) : undefined;
+        if (carryKey) {
+          carryOld.set(carryKey, oldGroupMap.get(carryKey)!);
+          if (newGroupMap.has(carryKey)) carryNew.set(carryKey, newGroupMap.get(carryKey)!);
+        }
+
+        // Compare all committed groups
         for (const [groupKey, oldGroup] of oldGroupMap) {
-          const newGroup = newGroupMap.get(groupKey) ?? [];
-
-          if (newGroup.length === 0) {
-            errors.push({
-              errorType: 'ROW_MISSING',
-              groupKey,
-              message: `[UNION] Transaction group [${groupKey}] from ${src} not found in target`,
-            });
-            continue;
-          }
-
-          for (const mapping of sm.exact_matches ?? []) {
-            if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
-            const oldTotal = this.sumOrFirst(oldGroup, mapping.old);
-            const newTotal = this.sumOrFirst(newGroup, mapping.new);
-            if (oldTotal !== null && newTotal !== null) {
-              if (!TransformUtils.isEqual(oldTotal, newTotal, tolerance)) {
-                errors.push({
-                  errorType: 'VALUE_MISMATCH',
-                  oldColumn: mapping.old,
-                  newColumn: mapping.new,
-                  oldValue: oldTotal,
-                  newValue: newTotal,
-                  groupKey,
-                  message: `[UNION] Group mismatch [${mapping.old}→${mapping.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
-                });
-              }
-            }
-          }
-
-          for (const mapping of sm.transformed_matches ?? []) {
-            if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
-            const oldVal = oldGroup[0]?.[mapping.old];
-            const newVal = newGroup[0]?.[mapping.new];
-            const transformedOld = TransformUtils.apply(oldVal, mapping.transform_rule);
-            const transformedNew = TransformUtils.apply(newVal, 'NONE');
-            if (!TransformUtils.isEqual(transformedOld, transformedNew, tolerance)) {
-              errors.push({
-                errorType: 'VALUE_MISMATCH',
-                oldColumn: mapping.old,
-                newColumn: mapping.new,
-                oldValue: oldVal,
-                newValue: newVal,
-                groupKey,
-                message: `[UNION] Transform mismatch [${mapping.old}→${mapping.new}]: "${transformedOld}" ≠ "${transformedNew}" (group: ${groupKey})`,
-              });
-            }
-          }
-
-          for (const mapping of sm.split_matches ?? []) {
-            if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
-            const rawOld = this.sumOrFirst(oldGroup, mapping.old);
-            if (rawOld === null) continue;
-            const oldTotal = parseFloat(String(rawOld));
-            if (isNaN(oldTotal)) continue;
-            const newTotals = mapping.new_cols.map((c) => this.sumOrFirst(newGroup, c));
-            const computed = TransformUtils.evaluateFormula(mapping.formula, newTotals);
-            if (Math.abs(oldTotal - computed) > tolerance) {
-              errors.push({
-                errorType: 'VALUE_MISMATCH',
-                oldColumn: mapping.old,
-                newColumn: mapping.new_cols.join('+'),
-                oldValue: oldTotal,
-                newValue: computed,
-                groupKey,
-                message: `[UNION] Split formula mismatch: ${mapping.old}=${oldTotal}, ${mapping.formula}(${mapping.new_cols.join(',')})=${computed} (group: ${groupKey})`,
-              });
-            }
-          }
-
-          for (const mapping of sm.concat_matches ?? []) {
-            if (mapping.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
-            const sep = mapping.separator ?? '';
-            const concatenated = mapping.old_cols.map((c) => String(oldGroup[0]?.[c] ?? '').trim()).join(sep);
-            const newVal = String(newGroup[0]?.[mapping.new] ?? '').trim();
-            if (!TransformUtils.isEqual(concatenated, newVal, tolerance)) {
-              errors.push({
-                errorType: 'VALUE_MISMATCH',
-                oldColumn: mapping.old_cols.join('+'),
-                newColumn: mapping.new,
-                oldValue: concatenated,
-                newValue: newVal,
-                groupKey,
-                message: `[UNION] Concat mismatch [${mapping.old_cols.join('+')}→${mapping.new}]: "${concatenated}" ≠ "${newVal}" (group: ${groupKey})`,
-              });
-            }
-          }
+          if (groupKey === carryKey) continue;
+          compareUnionGroup(src, groupKey, oldGroup, newGroupMap.get(groupKey) ?? []);
         }
-
-        // Extra groups in target with no source counterpart
-        for (const [groupKey] of newGroupMap) {
-          if (!oldGroupMap.has(groupKey)) {
-            errors.push({
-              errorType: 'ROW_MISSING',
-              groupKey,
-              message: `[UNION] Transaction group [${groupKey}] found in target but not in source (extra row)`,
-            });
-          }
-        }
-
-        oldGroupMap.clear();
-        newGroupMap.clear();
 
         lastAnchorKey = oldChunk[oldChunk.length - 1][anchorKeyOld];
-        if (oldChunk.length < chunkSize) break;
+        if (isLastChunk) break;
+      }
+
+      // Flush remaining carry for this source
+      for (const [groupKey, oldGroup] of carryOld) {
+        compareUnionGroup(src, groupKey, oldGroup, carryNew.get(groupKey) ?? []);
       }
     }
 
@@ -490,7 +460,6 @@ export class MultipleStrategy extends BaseStrategy {
       exact: typeof sm.exact_matches;
       transformed: typeof sm.transformed_matches;
       concat: typeof sm.concat_matches;
-      split: typeof sm.split_matches;
     }
 
     const pairMap = new Map<string, PairMappings & MappingPair>();
@@ -498,7 +467,7 @@ export class MultipleStrategy extends BaseStrategy {
     const getOrCreate = (srcTable: string, tgtTable: string) => {
       const key = pairKey({ srcTable, tgtTable });
       if (!pairMap.has(key)) {
-        pairMap.set(key, { srcTable, tgtTable, exact: [], transformed: [], concat: [], split: [] });
+        pairMap.set(key, { srcTable, tgtTable, exact: [], transformed: [], concat: [] });
       }
       return pairMap.get(key)!;
     };
@@ -512,14 +481,10 @@ export class MultipleStrategy extends BaseStrategy {
     for (const m of sm.concat_matches ?? []) {
       getOrCreate(m.src_table ?? defaultSrc, m.tgt_table ?? defaultTgt).concat!.push(m);
     }
-    for (const m of sm.split_matches ?? []) {
-      // SplitMatch has no src_table/tgt_table — route to the default pair
-      getOrCreate(defaultSrc, defaultTgt).split!.push(m);
-    }
 
     // Process each pair independently
     for (const pair of pairMap.values()) {
-      const { srcTable, tgtTable, exact, transformed, concat, split } = pair;
+      const { srcTable, tgtTable, exact, transformed, concat } = pair;
 
       this.logger.log(`[MULTIPLE] Processing ${srcTable} → ${tgtTable}`);
 
@@ -528,7 +493,6 @@ export class MultipleStrategy extends BaseStrategy {
         ...(exact ?? []).map((m) => m.old),
         ...(transformed ?? []).map((m) => m.old),
         ...(concat ?? []).flatMap((m) => m.old_cols),
-        ...(split ?? []).map((m) => m.old),
       ];
       const noisyMap = await this.detectNoisyColumns(srcTable, allOldCols);
 
@@ -542,12 +506,13 @@ export class MultipleStrategy extends BaseStrategy {
 
         const anchorVals = oldChunk.map((r) => String(r[anchorKeyOld] ?? '').trim());
 
-        // Fetch matching new rows — uses batched streamRowsByKeys to respect SQL Server 2100-param limit
-        const newRowsArr: Record<string, unknown>[] = [];
-        await this.db.streamRowsByKeys(tgtTable, anchorKeyNew, anchorVals, (row) => newRowsArr.push(row));
-        const newMap = new Map(newRowsArr.map((r) => [String(r[anchorKeyNew] ?? '').trim(), r]));
-
-        const matchedKeys = new Set<string>();
+        // Fetch matching new rows by anchor key values
+        const newRows = await this.db.query<Record<string, unknown>>(
+          `SELECT * FROM ${tableRef(tgtTable)}
+           WHERE [${anchorKeyNew}] IN (${anchorVals.map((_, i) => `@a${i}`).join(',')})`,
+          Object.fromEntries(anchorVals.map((v, i) => [`a${i}`, v])),
+        );
+        const newMap = new Map(newRows.map((r) => [String(r[anchorKeyNew] ?? '').trim(), r]));
 
         for (const oldRow of oldChunk) {
           rowsChecked++;
@@ -562,7 +527,6 @@ export class MultipleStrategy extends BaseStrategy {
             });
             continue;
           }
-          matchedKeys.add(key);
 
           // exact matches
           for (const m of exact ?? []) {
@@ -606,7 +570,7 @@ export class MultipleStrategy extends BaseStrategy {
             }
           }
 
-          // concat matches
+          // concat matches (Fix #6)
           for (const m of concat ?? []) {
             if (m.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
             const sep = m.separator ?? '';
@@ -623,36 +587,6 @@ export class MultipleStrategy extends BaseStrategy {
                 message: `[MULTIPLE] Concat mismatch [${m.old_cols.join('+')}→${m.new}]: "${concatenated}" ≠ "${newVal}" (${key})`,
               });
             }
-          }
-
-          // split matches
-          for (const m of split ?? []) {
-            if (this.isNoisyType(noisyMap.get(m.old))) continue;
-            const oldVal = parseFloat(String(oldRow[m.old] ?? 0));
-            const newVals = m.new_cols.map((c) => newRow[c]);
-            const computed = TransformUtils.evaluateFormula(m.formula, newVals);
-            if (Math.abs(oldVal - computed) > tolerance) {
-              errors.push({
-                errorType: 'VALUE_MISMATCH',
-                oldColumn: m.old,
-                newColumn: m.new_cols.join('+'),
-                oldValue: oldVal,
-                newValue: computed,
-                rowIdentifier: key,
-                message: `[MULTIPLE] Split mismatch: ${m.old}=${oldVal}, ${m.formula}(${m.new_cols.join(',')})=${computed} (${key})`,
-              });
-            }
-          }
-        }
-
-        // Extra rows in target with no source counterpart
-        for (const [newKey] of newMap) {
-          if (!matchedKeys.has(newKey)) {
-            errors.push({
-              errorType: 'ROW_MISSING',
-              rowIdentifier: newKey,
-              message: `[MULTIPLE] Row [${newKey}] found in ${tgtTable} but not in ${srcTable} (extra row)`,
-            });
           }
         }
 

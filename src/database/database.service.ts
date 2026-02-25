@@ -15,7 +15,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly config: ConfigService) {}
 
   async onModuleInit() {
-    // TODO: ค่า DB_* ต้องเติมใน .env
+    const missing = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].filter(
+      (k) => !this.config.get<string>(k),
+    );
+    if (missing.length > 0) {
+      throw new Error(`Missing required env vars: ${missing.join(', ')} — ensure vidar-db-secret is applied to the cluster`);
+    }
+
     const dbConfig: sql.config = {
       server: this.config.get<string>('DB_HOST') ?? '',   // TODO: ใส่ host
       port: parseInt(this.config.get<string>('DB_PORT') ?? '1433'),

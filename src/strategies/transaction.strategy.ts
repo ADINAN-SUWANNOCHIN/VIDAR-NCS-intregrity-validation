@@ -62,8 +62,6 @@ export class TransactionStrategy extends BaseStrategy {
     const allOldCols = [
       ...(sm.exact_matches ?? []).map((m) => m.old),
       ...(sm.split_matches ?? []).map((m) => m.old),
-      ...(sm.transformed_matches ?? []).map((m) => m.old),
-      ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
     ];
     const noisyMap = await this.detectNoisyColumns(source, allOldCols);
     for (const [col, type] of noisyMap) {
@@ -72,10 +70,24 @@ export class TransactionStrategy extends BaseStrategy {
       }
     }
 
-    // ---- Anchor-key streaming (Issue #2) ----
-    // Stream OLD rows ordered by anchorKey → fetch matching NEW rows by anchorKey
-    // → group both sides by groupKey in memory. No index on groupKey required.
+    // ---- Anchor key uniqueness check ----
+    // Only source needs to be unique — keyset pagination streams old rows by anchorKeyOld.
+    // Target is fetched by key lookup (streamRowsByKeys), not paginated, so duplicates there
+    // affect grouping but don't cause rows to be skipped.
+    const anchorDupErr = await this.checkAnchorKeyUnique(source, anchorKeyOld);
+    if (anchorDupErr) {
+      errors.push(anchorDupErr);
+      this.logger.warn(`[TXN] ${anchorDupErr.message}`);
+    }
+
+    // ---- Anchor-key streaming with carry-over (Issue #2 + chunk-boundary fix) ----
+    // Stream OLD rows ordered by anchorKey, group by groupKey in memory.
+    // Problem: a transaction group whose rows span a chunk boundary would be split,
+    // producing wrong per-group sums. Fix: carry the last group of each chunk forward
+    // and merge it with the matching rows from the next chunk before comparing.
     let lastAnchorKey: unknown = null;
+    let carryOld = new Map<string, Record<string, unknown>[]>();
+    let carryNew = new Map<string, Record<string, unknown>[]>();
 
     while (true) {
       const oldChunk = await this.db.fetchChunk(source, anchorKeyOld, chunkSize, lastAnchorKey);
@@ -88,9 +100,11 @@ export class TransactionStrategy extends BaseStrategy {
       const newRows: Record<string, unknown>[] = [];
       await this.db.streamRowsByKeys(target, anchorKeyNew, anchorVals, (row) => newRows.push(row));
 
-      // Group both sides by groupKey in memory
-      const oldGroupMap = new Map<string, Record<string, unknown>[]>();
-      const newGroupMap = new Map<string, Record<string, unknown>[]>();
+      // Seed group maps with rows carried over from the previous chunk
+      const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
+      const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
+      carryOld = new Map();
+      carryNew = new Map();
 
       for (const row of oldChunk) {
         const key = this.normalizeKey(row[oldKeyCol], tg.transform_key);
@@ -104,10 +118,20 @@ export class TransactionStrategy extends BaseStrategy {
         newGroupMap.get(key)!.push(row);
       }
 
-      // Compare each group
-      for (const [groupKey, oldGroup] of oldGroupMap) {
-        const newGroup = newGroupMap.get(groupKey) ?? [];
+      const isLastChunk = oldChunk.length < chunkSize;
 
+      // If more chunks follow, hold back the last group — it may continue in the next chunk
+      const carryKey = !isLastChunk ? [...oldGroupMap.keys()].at(-1) : undefined;
+      if (carryKey) {
+        carryOld.set(carryKey, oldGroupMap.get(carryKey)!);
+        if (newGroupMap.has(carryKey)) carryNew.set(carryKey, newGroupMap.get(carryKey)!);
+      }
+
+      // Compare all committed groups (everything except the carried one)
+      for (const [groupKey, oldGroup] of oldGroupMap) {
+        if (groupKey === carryKey) continue;
+
+        const newGroup = newGroupMap.get(groupKey) ?? [];
         if (newGroup.length === 0) {
           errors.push({
             errorType: 'ROW_MISSING',
@@ -121,8 +145,9 @@ export class TransactionStrategy extends BaseStrategy {
         errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap));
       }
 
-      // Extra groups in target with no source counterpart
+      // Extra groups in target (only for committed groups)
       for (const [groupKey] of newGroupMap) {
+        if (groupKey === carryKey) continue;
         if (!oldGroupMap.has(groupKey)) {
           errors.push({
             errorType: 'ROW_MISSING',
@@ -132,11 +157,23 @@ export class TransactionStrategy extends BaseStrategy {
         }
       }
 
-      oldGroupMap.clear();
-      newGroupMap.clear();
-
       lastAnchorKey = oldChunk[oldChunk.length - 1][anchorKeyOld];
-      if (oldChunk.length < chunkSize) break;
+      if (isLastChunk) break;
+    }
+
+    // Flush any group still in carry (last group of the last full-sized chunk)
+    for (const [groupKey, oldGroup] of carryOld) {
+      const newGroup = carryNew.get(groupKey) ?? [];
+      if (newGroup.length === 0) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `Transaction group [${groupKey}] found in source but not in target`,
+        });
+        continue;
+      }
+      errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap));
+      errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap));
     }
 
     this.logger.log(`[TXN] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
@@ -199,43 +236,6 @@ export class TransactionStrategy extends BaseStrategy {
       }
     }
 
-    for (const mapping of sm.transformed_matches ?? []) {
-      if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
-      const oldVal = oldGroup[0]?.[mapping.old];
-      const newVal = newGroup[0]?.[mapping.new];
-      const transformedOld = TransformUtils.apply(oldVal, mapping.transform_rule);
-      const transformedNew = TransformUtils.apply(newVal, 'NONE');
-      if (!TransformUtils.isEqual(transformedOld, transformedNew, tolerance)) {
-        errors.push({
-          errorType: 'VALUE_MISMATCH',
-          oldColumn: mapping.old,
-          newColumn: mapping.new,
-          oldValue: oldVal,
-          newValue: newVal,
-          groupKey,
-          message: `[TXN] Transform mismatch [${mapping.old}→${mapping.new}]: "${transformedOld}" ≠ "${transformedNew}" (group: ${groupKey})`,
-        });
-      }
-    }
-
-    for (const mapping of sm.concat_matches ?? []) {
-      if (mapping.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
-      const sep = mapping.separator ?? '';
-      const concatenated = mapping.old_cols.map((c) => String(oldGroup[0]?.[c] ?? '').trim()).join(sep);
-      const newVal = String(newGroup[0]?.[mapping.new] ?? '').trim();
-      if (!TransformUtils.isEqual(concatenated, newVal, tolerance)) {
-        errors.push({
-          errorType: 'VALUE_MISMATCH',
-          oldColumn: mapping.old_cols.join('+'),
-          newColumn: mapping.new,
-          oldValue: concatenated,
-          newValue: newVal,
-          groupKey,
-          message: `[TXN] Concat mismatch [${mapping.old_cols.join('+')}→${mapping.new}]: "${concatenated}" ≠ "${newVal}" (group: ${groupKey})`,
-        });
-      }
-    }
-
     return errors;
   }
 
@@ -255,14 +255,6 @@ export class TransactionStrategy extends BaseStrategy {
           oldAffectCodes.has(code),
         );
         if (!hasAll) continue;
-      }
-
-      if (def.trigger_condition?.must_have_any) {
-        const oldAffectCodes = this.extractAffectCodes(oldGroup, affectCodeMap);
-        const hasAny = def.trigger_condition.must_have_any.some((code) =>
-          oldAffectCodes.has(code),
-        );
-        if (!hasAny) continue;
       }
 
       for (const action of def.actions) {

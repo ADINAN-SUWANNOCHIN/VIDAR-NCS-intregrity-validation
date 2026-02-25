@@ -53,7 +53,7 @@ kubectl create secret docker-registry gitlab-registry-secret \
 
 ### 4b. DB Credentials Secret
 ```bash
-# Copy k8s/secret.template.yaml to k8s/secret.yaml, fill in values, then:
+# Copy secret.template.yaml (project root) to k8s/secret.yaml, fill in values, then:
 kubectl apply -f k8s/secret.yaml
 ```
 Values needed: `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
