@@ -1,10 +1,11 @@
 import { Body, Controller, Post } from '@nestjs/common';
+import { IsString } from 'class-validator';
 import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
 
 class LoginDto {
-  username: string;
-  password: string;
+  @IsString() username: string;
+  @IsString() password: string;
 }
 
 @Controller('auth')

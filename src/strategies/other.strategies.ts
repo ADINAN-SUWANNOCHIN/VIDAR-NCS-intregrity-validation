@@ -20,10 +20,13 @@ export class SplitStrategy extends BaseStrategy {
     const { source, target } = commonRule.table_info;
     let sm = commonRule.schema_mappings;
     const tolerance = commonRule.defaults?.tolerance ?? 0;
+    const anchorKeyOld = commonRule.anchor_key.old;
+    const anchorKeyNew = commonRule.anchor_key.new;
+    const chunkSize = parseInt(process.env.CHUNK_SIZE ?? '5000');
 
     this.logger.log(`[SPLIT] Validating ${source} → ${target}`);
 
-    // ---- Schema check — resilient (Issue #1) ----
+    // ---- Schema check ----
     const colErrors = await this.checkMissingColumns(source, target, [
       ...(sm.exact_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
     ]);
@@ -33,7 +36,7 @@ export class SplitStrategy extends BaseStrategy {
       sm = this.filterMappingsAfterSchemaCheck(sm, colErrors);
     }
 
-    // Noisy column detection (Fix #5)
+    // Noisy column detection
     const allOldCols = (sm.exact_matches ?? []).map((m) => m.old);
     const noisyMap = await this.detectNoisyColumns(source, allOldCols);
     for (const [col, type] of noisyMap) {
@@ -43,24 +46,30 @@ export class SplitStrategy extends BaseStrategy {
     }
 
     for (const mapping of sm.exact_matches ?? []) {
-      // Skip noisy columns (Fix #5)
       if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
 
-      const oldRows = await this.db.query<Record<string, unknown>>(
-        `SELECT [${mapping.old}] FROM ${tableRef(source)} WHERE [${mapping.old}] IS NOT NULL`
-      );
-      const newRows = await this.db.query<Record<string, unknown>>(
-        `SELECT [${mapping.new}] FROM ${tableRef(target)} WHERE [${mapping.new}] IS NOT NULL`
-      );
+      // ---- Stream new column values into a Set (O(distinct values) memory, not O(rows)) ----
+      // streamAllRows streams in chunks — only chunkSize rows in memory at any time.
+      // We accumulate only the mapped column value, not full row objects.
+      const newVals = new Set<string>();
+      await this.db.streamAllRows(target, anchorKeyNew, (row) => {
+        const v = row[mapping.new];
+        if (v !== null && v !== undefined && String(v).trim() !== '') {
+          newVals.add(String(v).trim());
+        }
+      }, chunkSize);
 
-      const oldVals = oldRows.map((r) => String(r[mapping.old] ?? '').trim());
-      const newVals = new Set(newRows.map((r) => String(r[mapping.new] ?? '').trim()));
-      rowsChecked += oldRows.length;
+      // ---- Stream old rows, check each value against the Set on the fly ----
+      // Never accumulates old rows — constant memory regardless of table size.
+      await this.db.streamAllRows(source, anchorKeyOld, (row) => {
+        const val = row[mapping.old];
+        if (val === null || val === undefined || String(val).trim() === '') return;
+        rowsChecked++;
 
-      for (const val of oldVals) {
         const transformed = mapping.transform_rule
-          ? (TransformUtils.apply(val, mapping.transform_rule) ?? val)
-          : val;
+          ? (TransformUtils.apply(val, mapping.transform_rule) ?? String(val).trim())
+          : String(val).trim();
+
         if (!newVals.has(transformed)) {
           errors.push({
             errorType: 'ROW_MISSING',
@@ -70,10 +79,10 @@ export class SplitStrategy extends BaseStrategy {
             message: `Value [${val}] from ${source}.${mapping.old} not found in ${target}.${mapping.new}`,
           });
         }
-      }
+      }, chunkSize);
     }
 
-    this.logger.log(`[SPLIT] Done: ${errors.length} error(s)`);
+    this.logger.log(`[SPLIT] Done: ${errors.length} error(s), ${rowsChecked} values checked`);
     return { errors, rowsChecked };
   }
 }
@@ -102,113 +111,125 @@ export class HeaderStrategy extends BaseStrategy {
 
     this.logger.log(`[HEADER] Validating pivot ${source} → ${target}`);
 
-    // Fallback: if no pivot_config or pivot_matches, do row-count check only
+    // Fallback: pivot_config or pivot_matches not defined — cannot validate without knowing
+    // the identity key and pivot structure. Any column-based count guess would be unreliable
+    // (system-generated IDs differ between old/new; anchor_key may repeat per pivot row).
+    // Instead: report a config gap and verify the target is at least not empty.
     if (!pc || pm.length === 0) {
       this.logger.warn(
-        `[HEADER] No pivot_config/pivot_matches in common.yaml — falling back to row count check. ` +
-          `Add pivot_config.identity_key, pivot_config.pivot_key, and schema_mappings.pivot_matches for full validation.`,
+        `[HEADER] pivot_config/pivot_matches not defined in common.yaml — proper pivot validation skipped. ` +
+          `Add pivot_config.identity_key, pivot_config.pivot_key, and schema_mappings.pivot_matches.`,
       );
-      const [oldCount] = await this.db.query<{ cnt: number }>(
-        `SELECT COUNT(DISTINCT [id]) as cnt FROM ${tableRef(source)}`,
-      );
+      errors.push({
+        errorType: 'DATA_MISSING',
+        message:
+          `[HEADER] ${source}: pivot_config not defined — pivot validation skipped. ` +
+          `Define pivot_config and schema_mappings.pivot_matches in common.yaml to enable full validation.`,
+      });
+
+      // Sanity check: target table should not be empty
       const [newCount] = await this.db.query<{ cnt: number }>(
         `SELECT COUNT(*) as cnt FROM ${tableRef(target)}`,
       );
-      if (oldCount?.cnt !== newCount?.cnt) {
+      if ((newCount?.cnt ?? 0) === 0) {
         errors.push({
           errorType: 'ROW_MISSING',
-          oldValue: oldCount?.cnt,
-          newValue: newCount?.cnt,
-          message: `Row count mismatch after pivot: source distinct=${oldCount?.cnt}, target rows=${newCount?.cnt}`,
+          message: `[HEADER] Target table ${target} is empty — migration may have failed entirely`,
         });
       }
-      return { errors, rowsChecked: oldCount?.cnt ?? 0 };
+
+      return { errors, rowsChecked: 0 };
     }
 
     const oldIdCol = pc.identity_key.old;
     const newIdCol = pc.identity_key.new;
     const pivotKey = pc.pivot_key;
-
-    // ---- 1. Build old pivot map: identity → pivot_key_value → value_col → value ----
-    // Query: SELECT identity_key, pivot_key, value_col(s) FROM source
     const valueCols = [...new Set(pm.map((p) => p.value_col))];
-    const oldQuery = `
-      SELECT [${oldIdCol}], [${pivotKey}], ${valueCols.map((c) => `[${c}]`).join(', ')}
-      FROM ${tableRef(source)}
-      ORDER BY [${oldIdCol}], [${pivotKey}]
-    `;
-    const oldRows = await this.db.query<Record<string, unknown>>(oldQuery);
-    rowsChecked = oldRows.length;
+    const chunkSize = parseInt(process.env.CHUNK_SIZE ?? '5000');
 
-    // Build map: identity → Map<pivotKeyValue, Map<valueCol, value>>
-    const oldMap = new Map<string, Map<string, Map<string, unknown>>>();
-    for (const row of oldRows) {
-      const id = String(row[oldIdCol] ?? '').trim();
-      const pkVal = String(row[pivotKey] ?? '').trim();
-      if (!oldMap.has(id)) oldMap.set(id, new Map());
-      if (!oldMap.get(id)!.has(pkVal)) oldMap.get(id)!.set(pkVal, new Map());
-      for (const vc of valueCols) {
-        oldMap.get(id)!.get(pkVal)!.set(vc, row[vc]);
-      }
-    }
+    // ---- Chunked pivot comparison ----
+    // Paginate by distinct identity keys from old table (getGroupKeys uses keyset, no OFFSET).
+    // For each batch: fetch old pivot rows + matching new wide rows → compare → discard.
+    // Memory at any point: O(chunkSize × avg_pivot_depth) — never the full table.
+    let lastIdentityKey: string | null = null;
 
-    // ---- 2. Query new (wide) table ----
-    const newCols = pm.map((p) => p.new_col);
-    const newQuery = `
-      SELECT [${newIdCol}], ${newCols.map((c) => `[${c}]`).join(', ')}
-      FROM ${tableRef(target)}
-      ORDER BY [${newIdCol}]
-    `;
-    const newRows = await this.db.query<Record<string, unknown>>(newQuery);
+    while (true) {
+      const identityKeys = await this.db.getGroupKeys(source, oldIdCol, chunkSize, lastIdentityKey);
+      if (identityKeys.length === 0) break;
 
-    // Build map: identity → row
-    const newMap = new Map<string, Record<string, unknown>>();
-    for (const row of newRows) {
-      newMap.set(String(row[newIdCol] ?? '').trim(), row);
-    }
+      // Fetch old pivot rows for this identity batch
+      const oldChunkRows: Record<string, unknown>[] = [];
+      await this.db.streamRowsByKeys(source, oldIdCol, identityKeys, (row) => oldChunkRows.push(row));
+      rowsChecked += oldChunkRows.length;
 
-    // ---- 3. Compare ----
-    for (const [id, pivotValues] of oldMap) {
-      const newRow = newMap.get(id);
-      if (!newRow) {
-        errors.push({
-          errorType: 'ROW_MISSING',
-          rowIdentifier: id,
-          message: `[HEADER] Identity [${id}] found in source but not in target`,
-        });
-        continue;
+      // Fetch matching new wide rows for this identity batch
+      const newChunkRows: Record<string, unknown>[] = [];
+      await this.db.streamRowsByKeys(target, newIdCol, identityKeys, (row) => newChunkRows.push(row));
+
+      // Build old pivot map: identity → pivotKeyValue → valueCol → value
+      const oldMap = new Map<string, Map<string, Map<string, unknown>>>();
+      for (const row of oldChunkRows) {
+        const id = String(row[oldIdCol] ?? '').trim();
+        const pkVal = String(row[pivotKey] ?? '').trim();
+        if (!oldMap.has(id)) oldMap.set(id, new Map());
+        if (!oldMap.get(id)!.has(pkVal)) oldMap.get(id)!.set(pkVal, new Map());
+        for (const vc of valueCols) {
+          oldMap.get(id)!.get(pkVal)!.set(vc, row[vc]);
+        }
       }
 
-      for (const pivotMatch of pm) {
-        const oldVal = pivotValues.get(pivotMatch.pivot_key_value)?.get(pivotMatch.value_col);
-        const newVal = newRow[pivotMatch.new_col];
+      // Build new map: identity → wide row
+      const newMap = new Map<string, Record<string, unknown>>();
+      for (const row of newChunkRows) {
+        newMap.set(String(row[newIdCol] ?? '').trim(), row);
+      }
 
-        if (!TransformUtils.isEqual(oldVal, newVal, tolerance)) {
+      // Compare pivot values for each identity in this batch
+      for (const [id, pivotValues] of oldMap) {
+        const newRow = newMap.get(id);
+        if (!newRow) {
           errors.push({
-            errorType: 'VALUE_MISMATCH',
-            oldColumn: `${pivotKey}='${pivotMatch.pivot_key_value}'.${pivotMatch.value_col}`,
-            newColumn: pivotMatch.new_col,
-            oldValue: oldVal,
-            newValue: newVal,
+            errorType: 'ROW_MISSING',
             rowIdentifier: id,
-            message:
-              `[HEADER] Pivot mismatch for id=[${id}], ` +
-              `${pivotKey}='${pivotMatch.pivot_key_value}': ` +
-              `${pivotMatch.value_col}=${oldVal} ≠ ${pivotMatch.new_col}=${newVal}`,
+            message: `[HEADER] Identity [${id}] found in source but not in target`,
+          });
+          continue;
+        }
+
+        for (const pivotMatch of pm) {
+          const oldVal = pivotValues.get(pivotMatch.pivot_key_value)?.get(pivotMatch.value_col);
+          const newVal = newRow[pivotMatch.new_col];
+
+          if (!TransformUtils.isEqual(oldVal, newVal, tolerance)) {
+            errors.push({
+              errorType: 'VALUE_MISMATCH',
+              oldColumn: `${pivotKey}='${pivotMatch.pivot_key_value}'.${pivotMatch.value_col}`,
+              newColumn: pivotMatch.new_col,
+              oldValue: oldVal,
+              newValue: newVal,
+              rowIdentifier: id,
+              message:
+                `[HEADER] Pivot mismatch for id=[${id}], ` +
+                `${pivotKey}='${pivotMatch.pivot_key_value}': ` +
+                `${pivotMatch.value_col}=${oldVal} ≠ ${pivotMatch.new_col}=${newVal}`,
+            });
+          }
+        }
+      }
+
+      // Extra new rows in this batch (new ids fetched but not in old)
+      for (const newId of newMap.keys()) {
+        if (!oldMap.has(newId)) {
+          errors.push({
+            errorType: 'ROW_MISSING',
+            rowIdentifier: newId,
+            message: `[HEADER] Identity [${newId}] found in target but not in source`,
           });
         }
       }
-    }
 
-    // Check for new rows that have no source counterpart
-    for (const newId of newMap.keys()) {
-      if (!oldMap.has(newId)) {
-        errors.push({
-          errorType: 'ROW_MISSING',
-          rowIdentifier: newId,
-          message: `[HEADER] Identity [${newId}] found in target but not in source`,
-        });
-      }
+      lastIdentityKey = identityKeys[identityKeys.length - 1];
+      if (identityKeys.length < chunkSize) break;
     }
 
     this.logger.log(`[HEADER] Done: ${errors.length} error(s), ${rowsChecked} old rows checked`);
@@ -395,6 +416,18 @@ export class UnionStrategy extends BaseStrategy {
           compareUnionGroup(src, groupKey, oldGroup, newGroupMap.get(groupKey) ?? []);
         }
 
+        // Extra groups in target not matched by this source's committed groups
+        for (const [groupKey] of newGroupMap) {
+          if (groupKey === carryKey) continue;
+          if (!oldGroupMap.has(groupKey)) {
+            errors.push({
+              errorType: 'ROW_MISSING',
+              groupKey,
+              message: `[UNION] Transaction group [${groupKey}] found in target but not in source ${src} (extra row)`,
+            });
+          }
+        }
+
         lastAnchorKey = oldChunk[oldChunk.length - 1][anchorKeyOld];
         if (isLastChunk) break;
       }
@@ -402,6 +435,17 @@ export class UnionStrategy extends BaseStrategy {
       // Flush remaining carry for this source
       for (const [groupKey, oldGroup] of carryOld) {
         compareUnionGroup(src, groupKey, oldGroup, carryNew.get(groupKey) ?? []);
+      }
+
+      // Extra groups still in carry target
+      for (const [groupKey] of carryNew) {
+        if (!carryOld.has(groupKey)) {
+          errors.push({
+            errorType: 'ROW_MISSING',
+            groupKey,
+            message: `[UNION] Transaction group [${groupKey}] found in target but not in source ${src} (extra row in carry)`,
+          });
+        }
       }
     }
 
@@ -506,12 +550,10 @@ export class MultipleStrategy extends BaseStrategy {
 
         const anchorVals = oldChunk.map((r) => String(r[anchorKeyOld] ?? '').trim());
 
-        // Fetch matching new rows by anchor key values
-        const newRows = await this.db.query<Record<string, unknown>>(
-          `SELECT * FROM ${tableRef(tgtTable)}
-           WHERE [${anchorKeyNew}] IN (${anchorVals.map((_, i) => `@a${i}`).join(',')})`,
-          Object.fromEntries(anchorVals.map((v, i) => [`a${i}`, v])),
-        );
+        // Fetch matching new rows via streamRowsByKeys which handles the 2100 SQL Server
+        // parameter limit by batching keys in 2000-key chunks internally.
+        const newRows: Record<string, unknown>[] = [];
+        await this.db.streamRowsByKeys(tgtTable, anchorKeyNew, anchorVals, (row) => newRows.push(row));
         const newMap = new Map(newRows.map((r) => [String(r[anchorKeyNew] ?? '').trim(), r]));
 
         for (const oldRow of oldChunk) {

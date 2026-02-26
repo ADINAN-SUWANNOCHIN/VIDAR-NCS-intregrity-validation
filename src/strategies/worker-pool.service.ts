@@ -13,7 +13,7 @@ interface PendingTask {
 @Injectable()
 export class WorkerPoolService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkerPoolService.name);
-  private readonly poolSize = Math.max(1, os.cpus().length - 1);
+  private readonly poolSize: number;
   private workers: Worker[] = [];
   private idleWorkers: Worker[] = [];
   private queue: PendingTask[] = [];
@@ -21,6 +21,14 @@ export class WorkerPoolService implements OnModuleInit, OnModuleDestroy {
   // Stored so the crash-restart handler can re-use the same script path + execArgv
   private workerScript!: string;
   private workerExecArgv!: string[];
+
+  constructor() {
+    const cpuBased = Math.max(1, os.cpus().length - 1);
+    const maxFromEnv = parseInt(process.env.MAX_WORKER_THREADS ?? '0');
+    // Prefer env cap so container CPU limits are respected (os.cpus() returns host count in Docker).
+    // If MAX_WORKER_THREADS is not set or invalid, fall back to cpu count.
+    this.poolSize = maxFromEnv > 0 ? Math.min(maxFromEnv, cpuBased) : cpuBased;
+  }
 
   onModuleInit(): void {
     const isDev = __filename.endsWith('.ts');

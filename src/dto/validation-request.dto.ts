@@ -4,18 +4,18 @@ import { Type } from 'class-transformer';
 export class TableConfig {
   @IsString()
   @IsNotEmpty()
-  tableName: string;
+  table_name: string;
 
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
-  defIds?: string[];
+  def_list?: string[];
 }
 
 export class ValidationRequestDto {
   @IsOptional()
   @IsString()
-  jobLabel?: string;
+  job_name?: string;
 
   @IsArray()
   @ValidateNested({ each: true })

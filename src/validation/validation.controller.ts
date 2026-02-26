@@ -27,10 +27,10 @@ export class ValidationController {
    *
    * ตัวอย่าง Postman body:
    * {
-   *   "jobLabel": "Migration batch 2024-06-12",
+   *   "job_name": "Nightly_Val_01",
    *   "tables": [
-   *     { "tableName": "lnhisthloan", "defIds": ["def01", "def02"] },
-   *     { "tableName": "lnloantransaction" }
+   *     { "table_name": "conv$vinplhistory", "def_list": ["def01", "def02"] },
+   *     { "table_name": "conv$vinpahistory" }
    *   ]
    * }
    */

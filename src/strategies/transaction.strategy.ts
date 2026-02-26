@@ -236,6 +236,28 @@ export class TransactionStrategy extends BaseStrategy {
       }
     }
 
+    // transformed_matches — sum numeric values per group (e.g. amounts with transform_rule: NONE).
+    // Non-numeric results (dates, strings) make sumColumn return null → comparison skipped gracefully.
+    for (const mapping of sm.transformed_matches ?? []) {
+      if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
+      const oldTotal = this.sumColumn(oldGroup, mapping.old);
+      const newTotal = this.sumColumn(newGroup, mapping.new);
+      if (oldTotal !== null && newTotal !== null && Math.abs(oldTotal - newTotal) > tolerance) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: mapping.old,
+          newColumn: mapping.new,
+          oldValue: oldTotal,
+          newValue: newTotal,
+          groupKey,
+          message: `Group sum mismatch [${mapping.old}→${mapping.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
+        });
+      }
+    }
+
+    // concat_matches — concatenation has no meaningful group-level aggregate; skipped here.
+    // Individual concat mismatches are caught by the aggregate SUM check if the column is numeric.
+
     return errors;
   }
 
@@ -249,12 +271,22 @@ export class TransactionStrategy extends BaseStrategy {
     const errors: ValidationError[] = [];
 
     for (const def of defRules) {
-      if (def.trigger_condition?.must_have_all) {
+      if (def.trigger_condition?.must_have_all || def.trigger_condition?.must_have_any) {
         const oldAffectCodes = this.extractAffectCodes(oldGroup, affectCodeMap);
-        const hasAll = def.trigger_condition.must_have_all.every((code) =>
-          oldAffectCodes.has(code),
-        );
-        if (!hasAll) continue;
+
+        if (def.trigger_condition.must_have_all) {
+          const hasAll = def.trigger_condition.must_have_all.every((code) =>
+            oldAffectCodes.has(code),
+          );
+          if (!hasAll) continue;
+        }
+
+        if (def.trigger_condition.must_have_any) {
+          const hasAny = def.trigger_condition.must_have_any.some((code) =>
+            oldAffectCodes.has(code),
+          );
+          if (!hasAny) continue;
+        }
       }
 
       for (const action of def.actions) {
