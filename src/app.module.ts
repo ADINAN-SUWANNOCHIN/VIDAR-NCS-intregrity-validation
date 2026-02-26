@@ -1,10 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { AuthModule } from './auth/auth.module';
-import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { DatabaseService } from './database/database.service';
 import { RuleLoaderService } from './rules/rule-loader.service';
 import { JobService } from './job/job.service';
@@ -22,7 +19,6 @@ import { SchemaService } from './schema/schema.service';
       isGlobal: true,
       envFilePath: '.env',
     }),
-    AuthModule,
   ],
   controllers: [AppController, ValidationController, SchemaController],
   providers: [
@@ -35,7 +31,6 @@ import { SchemaService } from './schema/schema.service';
     StrategyFactory,
     ValidationService,
     SchemaService,
-    { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
 })
 export class AppModule {}

@@ -10,8 +10,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
 spec:
   rules:
-    # TODO: Replace with actual hostname once confirmed with infra team
-    - host: PLACEHOLDER_HOSTNAME   # e.g. vidar.bam.co.th
+    - host: vidar-ncs-sit.arctic.bamdns.local
       http:
         paths:
           - path: /
