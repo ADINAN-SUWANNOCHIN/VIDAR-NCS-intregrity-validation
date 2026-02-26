@@ -23,7 +23,7 @@ export class ValidationService {
   // สร้าง Job แล้วรันแบบ Background (Fire-and-forget)
   // ----------------------------------------------------------------
   async startJob(dto: ValidationRequestDto): Promise<string> {
-    const jobId = this.jobService.createJob(dto.tables.length, dto.jobLabel);
+    const jobId = this.jobService.createJob(dto.tables.length, dto.job_name);
     this.logger.log(`[Job:${jobId}] Created for ${dto.tables.length} table(s)`);
 
     // รันใน background – ไม่ await เพื่อให้ response กลับทันที
@@ -47,7 +47,7 @@ export class ValidationService {
     const affectCodeMap = new Map(globalCodes.codes.map((c) => [c.code.toUpperCase(), c.description]));
 
     for (const tableConfig of dto.tables) {
-      const tableName = tableConfig.tableName;
+      const tableName = tableConfig.table_name;
       const start = Date.now();
 
       this.logger.log(`[Job:${jobId}] Processing table: ${tableName}`);
@@ -87,7 +87,7 @@ export class ValidationService {
       }
 
       // ---- โหลด def rules ----
-      const defRules = this.ruleLoader.loadDefRules(tableName, tableConfig.defIds);
+      const defRules = this.ruleLoader.loadDefRules(tableName, tableConfig.def_list);
 
       // ---- เลือก Strategy ----
       let errors: ValidationError[] = [];
