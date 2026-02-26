@@ -16,10 +16,23 @@ export class TransformUtils {
       case 'STRIP_SPECIAL_CHARS':
         return str.replace(/[^a-zA-Z0-9]/g, '');
 
-      case 'DATE_TO_DATETIME':
-        // Normalize to YYYY-MM-DD for comparison
-        // Handles: "2008-11-30", "2021-02-05T00:00:00.000+07:00", "2021-02-05T00:00:00.000Z"
-        return str.split('T')[0].split(' ')[0].substring(0, 10);
+      case 'DATE_TO_DATETIME': {
+        // 1. ISO / ISO-datetime — most common path (fast exit)
+        //    Handles: "2008-11-30", "2021-02-05T00:00:00.000+07:00", "2021-02-05T00:00:00.000Z"
+        const isoChunk = str.split('T')[0].split(' ')[0];
+        if (/^\d{4}-\d{2}-\d{2}$/.test(isoChunk)) return isoChunk;
+
+        // 2. dd/mm/yyyy or dd-mm-yyyy  (Thai legacy day-first format)
+        //    ASSUMPTION: day comes first — standard for Thai banking systems.
+        //    If source uses US month-first (mm/dd/yyyy), swap dmyMatch[1] and dmyMatch[2].
+        const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+        if (dmyMatch) {
+          return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
+        }
+
+        // 3. Fallback — return best-effort ISO chunk; isEqual will compare as strings
+        return isoChunk;
+      }
 
       case 'SPLIT_FIRST':
         // Composite key split: "123450002" → "12345" (last 4 chars are the suffix)

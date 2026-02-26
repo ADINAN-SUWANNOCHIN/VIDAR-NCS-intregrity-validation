@@ -74,14 +74,28 @@ export class WorkerPoolService implements OnModuleInit, OnModuleDestroy {
       (worker as any)._task = null;
 
       this.logger.error(`Worker crashed: ${err.message}`);
-      if (task) task.reject(err);
 
-      // Replace the crashed worker with a fresh one
+      if (task) {
+        // M2: resolve instead of reject — master.strategy records this chunk as TRANSFORM_ERROR
+        // and continues processing remaining chunks. Rejecting would abort the whole table.
+        task.resolve({
+          errors: [{
+            errorType: 'TRANSFORM_ERROR',
+            message: `Worker thread crashed while processing chunk: ${err.message}`,
+          }],
+        });
+      }
+
+      // Replace crashed worker; immediately pick up a queued task if one is waiting
       const idx = this.workers.indexOf(worker);
       if (idx !== -1) {
         const fresh = this.spawnWorker();
         this.workers[idx] = fresh;
-        this.idleWorkers.push(fresh);
+        if (this.queue.length > 0) {
+          this.dispatch(fresh, this.queue.shift()!);
+        } else {
+          this.idleWorkers.push(fresh);
+        }
       }
     });
   }

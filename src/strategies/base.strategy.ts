@@ -92,7 +92,12 @@ export abstract class BaseStrategy {
       concat_matches: (sm.concat_matches ?? []).filter(
         (m) => !m.old_cols.some((c) => missingOld.has(c)) && !missingNew.has(m.new),
       ),
-      pivot_matches: sm.pivot_matches,
+      // L3: filter pivot_matches the same way as other mapping types.
+      // Previously passed through unfiltered, so a missing pivot column would cause
+      // wrong comparisons or silent undefined-value mismatches in HEADER strategy.
+      pivot_matches: (sm.pivot_matches ?? []).filter(
+        (m) => !missingOld.has(m.value_col) && !missingNew.has(m.new_col),
+      ),
     };
   }
 
@@ -116,16 +121,23 @@ export abstract class BaseStrategy {
   }
 
   protected async getColumnNames(tableName: string): Promise<string[]> {
-    const crossDb = tableName.match(/\[([^\]]+)\]\.(?:[^\[.]+\.)?\[([^\]]+)\]/);
+    // C10: parse [db].[schema].[table] — capture schema to filter INFORMATION_SCHEMA correctly.
+    // Without TABLE_SCHEMA filter, DBs with the same table in multiple schemas return duplicate
+    // columns → false COLUMN_MISSING errors or incorrect schema checks.
+    const crossDb = tableName.match(/\[([^\]]+)\]\.(?:\[?([^\[\].]+)\]?\.)?\[([^\]]+)\]/);
     if (crossDb) {
-      const [, db, tbl] = crossDb;
+      const [, db, schema, tbl] = crossDb;
+      const schemaFilter = schema ? `AND TABLE_SCHEMA = '${schema}'` : `AND TABLE_SCHEMA = 'dbo'`;
       const rows = await this.db.query<{ COLUMN_NAME: string }>(
-        `SELECT COLUMN_NAME FROM [${db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${tbl}'`,
+        `SELECT COLUMN_NAME FROM [${db}].INFORMATION_SCHEMA.COLUMNS ` +
+        `WHERE TABLE_NAME = '${tbl}' ${schemaFilter} ORDER BY ORDINAL_POSITION`,
       );
       return rows.map((r) => r.COLUMN_NAME);
     }
+    // Simple table name (no cross-db ref) — default to dbo schema
     const rows = await this.db.query<{ COLUMN_NAME: string }>(
-      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${tableName}'`,
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS ` +
+      `WHERE TABLE_NAME = '${tableName}' AND TABLE_SCHEMA = 'dbo' ORDER BY ORDINAL_POSITION`,
     );
     return rows.map((r) => r.COLUMN_NAME);
   }

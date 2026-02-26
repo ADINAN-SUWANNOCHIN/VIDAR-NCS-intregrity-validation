@@ -29,7 +29,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       password: this.config.get<string>('DB_PASSWORD'), // TODO: ใส่ password
       database: this.config.get<string>('DB_NAME'), // TODO: ใส่ db name
       options: {
-        encrypt: true,
+        encrypt: this.config.get<string>('DB_ENCRYPT') !== 'false', // defaults true; set DB_ENCRYPT=false for plain SQL Server
         trustServerCertificate: true,
         readOnlyIntent: true,
         cryptoCredentialsDetails: { minVersion: 'TLSv1' }, // required for older SQL Server
@@ -123,6 +123,22 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Bind the keyset cursor @lastKey with the correct SQL type.
+   * The mssql driver returns native JS types from the DB (INT → number, VARCHAR → string).
+   * Always using NVarChar causes string-comparison ordering on numeric anchor keys
+   * (e.g. '9' > '10'), which breaks keyset pagination. (C2)
+   */
+  private bindLastKey(req: sql.Request, value: unknown): void {
+    if (typeof value === 'number') {
+      Number.isInteger(value)
+        ? req.input('lastKey', sql.BigInt, value)
+        : req.input('lastKey', sql.Float, value);
+    } else {
+      req.input('lastKey', sql.NVarChar, String(value));
+    }
+  }
+
+  /**
    * Stream ทุก row ของ table แบบ keyset/cursor pagination
    * ใช้สำหรับ Master / Header table ที่ไม่มี transaction group key
    *
@@ -147,7 +163,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         : `WHERE [${anchorColumn}] > @lastKey`;
 
       if (lastKey !== null) {
-        request.input('lastKey', sql.NVarChar, String(lastKey));
+        this.bindLastKey(request, lastKey);
       }
 
       request.query(`
@@ -216,7 +232,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         : `WHERE [${anchorColumn}] > @lastKey`;
 
     if (lastKey !== null) {
-      request.input('lastKey', sql.NVarChar, String(lastKey));
+      this.bindLastKey(request, lastKey);
     }
 
     request.query(`

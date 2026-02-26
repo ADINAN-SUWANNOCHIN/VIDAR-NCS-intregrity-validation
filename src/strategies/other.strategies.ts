@@ -179,9 +179,25 @@ export class HeaderStrategy extends BaseStrategy {
       }
 
       // Build new map: identity → wide row
+      // M1: detect duplicate identities in target — migration bug creates extra rows in the
+      // wide-format table. Without this check, the second row silently overwrites the first
+      // in the Map, causing the comparison to use wrong data (false mismatches or false passes).
+      // Fix: keep the first occurrence, push TRANSFORM_ERROR for every duplicate so the
+      // migration bug is visible in the report.
       const newMap = new Map<string, Record<string, unknown>>();
       for (const row of newChunkRows) {
-        newMap.set(String(row[newIdCol] ?? '').trim(), row);
+        const id = String(row[newIdCol] ?? '').trim();
+        if (newMap.has(id)) {
+          errors.push({
+            errorType: 'TRANSFORM_ERROR',
+            rowIdentifier: id,
+            message:
+              `[HEADER] Duplicate identity [${id}] found in target ${target} — ` +
+              `migration created extra rows; first occurrence used for comparison`,
+          });
+          continue; // skip duplicate — keep first row
+        }
+        newMap.set(id, row);
       }
 
       // Compare pivot values for each identity in this batch
@@ -460,7 +476,13 @@ export class UnionStrategy extends BaseStrategy {
     if (nums.every((n) => !isNaN(n))) {
       return nums.reduce((a, b) => a + b, 0);
     }
-    return String(vals[0] ?? '').trim();
+    // Non-numeric: return sorted distinct non-empty values joined by '|'.
+    // Sorted + deduplicated → order-independent comparison regardless of SQL row ordering.
+    // The CSV report will show e.g. "val1|val2" which is still human-readable.
+    const unique = [
+      ...new Set(vals.map((v) => String(v ?? '').trim()).filter((v) => v !== '')),
+    ].sort();
+    return unique.length > 0 ? unique.join('|') : null;
   }
 }
 
@@ -548,7 +570,9 @@ export class MultipleStrategy extends BaseStrategy {
         const oldChunk = await this.db.fetchChunk(srcTable, anchorKeyOld, chunkSize, lastKey);
         if (oldChunk.length === 0) break;
 
-        const anchorVals = oldChunk.map((r) => String(r[anchorKeyOld] ?? '').trim());
+        // M4: deduplicate anchor values — consistent with TRANSACTION and UNION strategies.
+        // Duplicate params waste batch slots (2000-param limit) without changing query results.
+        const anchorVals = [...new Set(oldChunk.map((r) => String(r[anchorKeyOld] ?? '').trim()))];
 
         // Fetch matching new rows via streamRowsByKeys which handles the 2100 SQL Server
         // parameter limit by batching keys in 2000-key chunks internally.

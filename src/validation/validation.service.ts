@@ -63,7 +63,7 @@ export class ValidationService {
           fail: 0,
           missing: 1,
           timeSpent: Date.now() - start,
-          errors: [{ errorType: 'COLUMN_MISSING', message: `No rule directory found for table ${tableName}` }],
+          errors: [{ errorType: 'DATA_MISSING', message: `No rule directory found for table ${tableName}` }],
         });
         this.jobService.incrementDone(jobId);
         continue;
@@ -80,7 +80,7 @@ export class ValidationService {
           missing: 1,
           timeSpent: Date.now() - start,
           rowsChecked: 0,
-        errors: [{ errorType: 'COLUMN_MISSING', message: `common.yaml not found or parse error for ${tableName}` }],
+        errors: [{ errorType: 'DATA_MISSING', message: `common.yaml not found or parse error for ${tableName}` }],
         });
         this.jobService.incrementDone(jobId);
         continue;
@@ -146,28 +146,41 @@ export class ValidationService {
 
     // Only run if schema_mappings has a transactionamount → transactionamount mapping
     // and the table has transaction_grouping (so affectcode makes sense)
-    const amountMapping = commonRule.schema_mappings.transformed_matches?.find(
-      (m) => m.old === 'transactionamount' && m.new === 'transactionamount',
-    ) ?? commonRule.schema_mappings.exact_matches?.find(
-      (m) => m.old === 'transactionamount' && m.new === 'transactionamount',
+    // L2: find any amount-type column instead of hardcoding 'transactionamount'.
+    // Tables with different naming conventions (e.g. 'txnamount', 'debitamount') will now
+    // also get the aggregate check instead of silently skipping it.
+    const amountMapping = [
+      ...(commonRule.schema_mappings.transformed_matches ?? []),
+      ...(commonRule.schema_mappings.exact_matches ?? []),
+    ].find((m) =>
+      m.old.toLowerCase().includes('amount') && m.new.toLowerCase().includes('amount'),
     );
 
     if (!amountMapping || !commonRule.transaction_grouping) return errors;
 
     const { source, target } = commonRule.table_info;
     const tolerance = commonRule.defaults?.tolerance ?? 0.01;
-    const affectCol = { old: 'affectcode', new: 'affectcode' };
+
+    // L2: affectcode column name variants — DB stores short codes like "A1", "PP", "BC".
+    // Primary attempt is 'affectcode'; outer try/catch logs a warning if column name differs.
+    // Confirmed from affect_codes.json: codes are 2-char uppercase strings (A1, BC, PP, ...).
+    const AFFECT_CODE_VARIANTS = ['affectcode', 'affect_code', 'afcode', 'affcode', 'affect_cd'];
+    const affectCol = { old: AFFECT_CODE_VARIANTS[0], new: AFFECT_CODE_VARIANTS[0] };
 
     try {
-      // For UNION: use the first source table only for the check
-      const primarySource = source.split(',')[0].trim();
+      // C9: For UNION tables (multiple sources), aggregate SUM across ALL sources per affectcode.
+      // Previous code used only sources[0], silently ignoring discrepancies in sources[1..n].
+      const allSources = source.split(',').map((s) => s.trim());
+      const oldSumsAgg = new Map<string, number>();
+      for (const src of allSources) {
+        const srcSums = await this.db.querySumByGroup(src, amountMapping.old, affectCol.old);
+        for (const [code, total] of srcSums) {
+          oldSumsAgg.set(code, (oldSumsAgg.get(code) ?? 0) + total);
+        }
+      }
+      const newSums = await this.db.querySumByGroup(target, amountMapping.new, affectCol.new);
 
-      const [oldSums, newSums] = await Promise.all([
-        this.db.querySumByGroup(primarySource, 'transactionamount', affectCol.old),
-        this.db.querySumByGroup(target, 'transactionamount', affectCol.new),
-      ]);
-
-      for (const [code, oldTotal] of oldSums) {
+      for (const [code, oldTotal] of oldSumsAgg) {
         const newTotal = newSums.get(code) ?? 0;
         if (Math.abs(oldTotal - newTotal) > tolerance) {
           errors.push({
@@ -182,7 +195,7 @@ export class ValidationService {
       }
 
       if (errors.length === 0) {
-        this.logger.log(`[${tableName}] Aggregate SUM check PASSED for ${oldSums.size} affect code(s)`);
+        this.logger.log(`[${tableName}] Aggregate SUM check PASSED for ${oldSumsAgg.size} affect code(s) across ${allSources.length} source(s)`);
       } else {
         this.logger.warn(`[${tableName}] Aggregate SUM check found ${errors.length} discrepancy(ies)`);
       }
