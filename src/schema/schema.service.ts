@@ -91,7 +91,10 @@ export class SchemaService {
    * Parses any table reference format into { db, table }.
    * Handles: [db].[schema].[table], [db].schema.table, schema.table, table
    */
-  private parseTableRef(tableName: string): { db: string | null; table: string } {
+  // C10: also extract schema segment so INFORMATION_SCHEMA queries are filtered correctly.
+  // Multi-schema DBs with the same table name in different schemas would otherwise return
+  // columns from all matching tables, causing incorrect schema analysis results.
+  private parseTableRef(tableName: string): { db: string | null; schema: string | null; table: string } {
     const parts: string[] = [];
     let current = '';
     let inBracket = false;
@@ -103,22 +106,29 @@ export class SchemaService {
     }
     if (current) parts.push(current);
     const strip = (s: string) => s.replace(/^\[|\]$/g, '');
+    // 3 parts: [db].[schema].[table]
+    // 2 parts: [db].[table]  (schema unknown → default dbo)
+    // 1 part:  [table]
     return {
-      db: parts.length >= 2 ? strip(parts[0]) : null,
-      table: strip(parts[parts.length - 1]),
+      db:     parts.length >= 3 ? strip(parts[0]) : (parts.length === 2 ? strip(parts[0]) : null),
+      schema: parts.length >= 3 ? strip(parts[1]) : null,
+      table:  strip(parts[parts.length - 1]),
     };
   }
 
   private async getColumnNames(tableName: string): Promise<string[]> {
-    const { db, table } = this.parseTableRef(tableName);
+    const { db, schema, table } = this.parseTableRef(tableName);
+    const schemaFilter = schema ? `AND TABLE_SCHEMA = '${schema}'` : `AND TABLE_SCHEMA = 'dbo'`;
     if (db) {
       const rows = await this.db.query<{ COLUMN_NAME: string }>(
-        `SELECT COLUMN_NAME FROM [${db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${table}' ORDER BY ORDINAL_POSITION`,
+        `SELECT COLUMN_NAME FROM [${db}].INFORMATION_SCHEMA.COLUMNS ` +
+        `WHERE TABLE_NAME = '${table}' ${schemaFilter} ORDER BY ORDINAL_POSITION`,
       );
       return rows.map((r) => r.COLUMN_NAME);
     }
     const rows = await this.db.query<{ COLUMN_NAME: string }>(
-      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${table}' ORDER BY ORDINAL_POSITION`,
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS ` +
+      `WHERE TABLE_NAME = '${table}' ${schemaFilter} ORDER BY ORDINAL_POSITION`,
     );
     return rows.map((r) => r.COLUMN_NAME);
   }

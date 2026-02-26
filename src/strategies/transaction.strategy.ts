@@ -142,7 +142,7 @@ export class TransactionStrategy extends BaseStrategy {
         }
 
         errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap));
-        errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap));
+        errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
       }
 
       // Extra groups in target (only for committed groups)
@@ -173,7 +173,7 @@ export class TransactionStrategy extends BaseStrategy {
         continue;
       }
       errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap));
-      errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap));
+      errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
     }
 
     this.logger.log(`[TXN] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
@@ -267,6 +267,7 @@ export class TransactionStrategy extends BaseStrategy {
     newGroup: Record<string, unknown>[],
     defRules: DefRule[],
     affectCodeMap: Map<string, string>,
+    tolerance: number, // C4: thread tolerance down to evaluateCondition
   ): ValidationError[] {
     const errors: ValidationError[] = [];
 
@@ -290,7 +291,7 @@ export class TransactionStrategy extends BaseStrategy {
       }
 
       for (const action of def.actions) {
-        errors.push(...this.evaluateDefAction(def.def_id, groupKey, oldGroup, newGroup, action));
+        errors.push(...this.evaluateDefAction(def.def_id, groupKey, oldGroup, newGroup, action, tolerance));
       }
     }
 
@@ -303,16 +304,30 @@ export class TransactionStrategy extends BaseStrategy {
     oldGroup: Record<string, unknown>[],
     newGroup: Record<string, unknown>[],
     action: any,
+    tolerance: number, // C4
   ): ValidationError[] {
     const errors: ValidationError[] = [];
 
     if (action.check_type === 'ROW_LEVEL_COHESION') {
       const resolvedVars: Record<string, number> = {};
-      for (const [varName, expr] of Object.entries(action.variables ?? {})) {
-        resolvedVars[varName] = this.evaluateExpression(String(expr), oldGroup);
+
+      // C5: evaluateExpression throws on unparseable expression — catch here so other DEF
+      // rules in the same group still run (error is recorded, not propagated).
+      try {
+        for (const [varName, expr] of Object.entries(action.variables ?? {})) {
+          resolvedVars[varName] = this.evaluateExpression(String(expr), oldGroup);
+        }
+      } catch (e: any) {
+        errors.push({
+          errorType: 'TRANSFORM_ERROR',
+          defId,
+          groupKey,
+          message: `DEF rule expression error (${defId}): ${e.message}`,
+        });
+        return errors; // skip condition check for this action — variables couldn't be resolved
       }
 
-      const conditionMet = this.evaluateCondition(action.condition, newGroup, resolvedVars);
+      const conditionMet = this.evaluateCondition(action.condition, newGroup, resolvedVars, tolerance); // C4
       if (!conditionMet) {
         errors.push({
           errorType: 'DEFECT_VIOLATION',
@@ -334,13 +349,19 @@ export class TransactionStrategy extends BaseStrategy {
         .filter((r) => String(r[filterCol] ?? '').toUpperCase() === filterVal.toUpperCase())
         .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
     }
-    return 0;
+    // C5: throw instead of silently returning 0 — caller (evaluateDefAction) catches this
+    // and records a TRANSFORM_ERROR so the malformed expression is visible in the report.
+    throw new Error(
+      `DEF rule expression not parseable: "${expr}" — ` +
+      `supported format: SUM(old.columnName) WHERE filterColumn == 'value'`,
+    );
   }
 
   private evaluateCondition(
     condition: string,
     newGroup: Record<string, unknown>[],
     vars: Record<string, number>,
+    tolerance: number, // C4: use table-configured tolerance instead of hardcoded 0.01
   ): boolean {
     const checks: Array<{ col: string; varName: string }> = [];
     const pattern = /target\.(\w+)\s*==\s*(val_\w+)/g;
@@ -353,7 +374,7 @@ export class TransactionStrategy extends BaseStrategy {
       checks.every((chk) => {
         const expected = vars[chk.varName] ?? 0;
         const actual = parseFloat(String(row[chk.col] ?? 0)) || 0;
-        return Math.abs(actual - expected) <= 0.01;
+        return Math.abs(actual - expected) <= tolerance;
       }),
     );
   }
@@ -366,16 +387,42 @@ export class TransactionStrategy extends BaseStrategy {
     return nums.reduce((a, b) => a + b, 0);
   }
 
+  // C3: common name variants for the affect code column (case-insensitive check)
+  private static readonly AFFECT_CODE_VARIANTS = [
+    'affectcode', 'affect_code', 'afcode', 'affcode',
+    'affect_cd',  'affectcd',   'af_code', 'aff_code',
+  ];
+
   private extractAffectCodes(
     rows: Record<string, unknown>[],
     affectCodeMap: Map<string, string>,
   ): Set<string> {
     const codeSet = new Set<string>();
+    if (rows.length === 0) return codeSet;
+
+    // Locate the affect code column once — handles any casing and all known name variants.
+    // Previous implementation scanned Object.values(row) for every column on every row,
+    // which could falsely match affect code values in unrelated columns (e.g. amount = "001").
+    const rowKeys = Object.keys(rows[0]);
+    const colName = rowKeys.find((k) =>
+      TransactionStrategy.AFFECT_CODE_VARIANTS.includes(k.toLowerCase()),
+    );
+
+    if (!colName) {
+      // No affect code column found — DEF trigger_condition checks that use affect codes
+      // will be skipped for this table. This is expected for non-transaction tables.
+      this.logger.warn(
+        `[TXN] No affect code column found (checked: ${TransactionStrategy.AFFECT_CODE_VARIANTS.join(', ')}) — ` +
+        `trigger_condition checks will be skipped`,
+      );
+      return codeSet;
+    }
+
     for (const row of rows) {
-      for (const val of Object.values(row)) {
-        const str = String(val ?? '').toUpperCase();
-        if (affectCodeMap.has(str)) codeSet.add(str);
-      }
+      const val = row[colName];
+      if (val == null) continue;
+      const str = String(val).toUpperCase();
+      if (affectCodeMap.has(str)) codeSet.add(str);
     }
     return codeSet;
   }

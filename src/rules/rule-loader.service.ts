@@ -28,7 +28,8 @@ export class RuleLoaderService {
     const filePath = path.join(this.rulesDir, 'global', 'affect_codes.json');
     if (!fs.existsSync(filePath)) {
       this.logger.warn(`affect_codes.json not found at ${filePath}, using empty set`);
-      return { codes: [] };
+      this.globalAffectCodes = { codes: [] }; // L4: cache so fs.existsSync is not repeated per table
+      return this.globalAffectCodes;
     }
 
     const raw = fs.readFileSync(filePath, 'utf-8');
@@ -65,7 +66,10 @@ export class RuleLoaderService {
   // Def Rules (.yaml) – โหลดทุก def ของ table หรือเฉพาะ defIds
   // ----------------------------------------------------------------
   loadDefRules(tableName: string, defIds?: string[]): DefRule[] {
-    const cacheKey = `${tableName}::${(defIds ?? ['*']).join(',')}`;
+    // M3: sort a copy of defIds so cache key is order-independent.
+    // ['def02','def01'] and ['def01','def02'] refer to the same set — same result should be cached.
+    const sortedIds = defIds ? [...defIds].sort() : ['*'];
+    const cacheKey = `${tableName}::${sortedIds.join(',')}`;
     if (this.defRuleCache.has(cacheKey)) {
       return this.defRuleCache.get(cacheKey)!;
     }
