@@ -1,0 +1,6 @@
+name: CIT
+module: NPA
+description: Corporate Income Tax related tables
+tables:
+  - table_name: PLACEHOLDER_NPA_CIT_TABLE_1
+  - table_name: PLACEHOLDER_NPA_CIT_TABLE_2

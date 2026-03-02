@@ -1,0 +1,6 @@
+name: SBT
+module: NPL
+description: Specific Business Tax related tables
+tables:
+  - table_name: PLACEHOLDER_NPL_SBT_TABLE_1
+  - table_name: PLACEHOLDER_NPL_SBT_TABLE_2
