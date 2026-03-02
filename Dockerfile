@@ -24,9 +24,10 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Copy compiled output and rule configs
+# Copy compiled output, rule configs, and preset configs
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/rules ./rules
+COPY --from=builder /app/presets ./presets
 
 # Reports directory (will be mounted as emptyDir in k8s)
 RUN mkdir -p /app/reports
