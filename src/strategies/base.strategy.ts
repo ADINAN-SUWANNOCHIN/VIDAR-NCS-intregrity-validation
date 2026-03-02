@@ -101,25 +101,6 @@ export abstract class BaseStrategy {
     };
   }
 
-  protected mismatch(
-    oldColumn: string,
-    newColumn: string,
-    oldValue: unknown,
-    newValue: unknown,
-    _extra?: unknown,
-    rowIdentifier?: string,
-  ): ValidationError {
-    return {
-      errorType: 'VALUE_MISMATCH',
-      oldColumn,
-      newColumn,
-      oldValue,
-      newValue,
-      rowIdentifier,
-      message: `Mismatch on [${oldColumn}→${newColumn}]: "${oldValue}" ≠ "${newValue}"${rowIdentifier ? ` (${rowIdentifier})` : ''}`,
-    };
-  }
-
   protected async getColumnNames(tableName: string): Promise<string[]> {
     // C10: parse [db].[schema].[table] — capture schema to filter INFORMATION_SCHEMA correctly.
     // Without TABLE_SCHEMA filter, DBs with the same table in multiple schemas return duplicate
