@@ -1,5 +1,5 @@
 import { DatabaseService, tableRef } from '../database/database.service';
-import { ValidationError } from '../rules/rule.types';
+import { ConcatMatch, ExactMatch, NoisyColumnType, TransformedMatch, ValidationError } from '../rules/rule.types';
 import { BaseStrategy, ValidationContext } from './base.strategy';
 import { TransformUtils } from './transform.utils';
 
@@ -19,7 +19,6 @@ export class SplitStrategy extends BaseStrategy {
     const { commonRule } = ctx;
     const { source, target } = commonRule.table_info;
     let sm = commonRule.schema_mappings;
-    const tolerance = commonRule.defaults?.tolerance ?? 0;
     const anchorKeyOld = commonRule.anchor_key.old;
     const anchorKeyNew = commonRule.anchor_key.new;
     const chunkSize = parseInt(process.env.CHUNK_SIZE ?? '5000');
@@ -487,7 +486,7 @@ export class UnionStrategy extends BaseStrategy {
 }
 
 // ============================================================
-// MULTIPLE Strategy (N:N)
+// MULTIPLE Strategy (N:N or N:1)
 //
 // Fix #4: Routes each mapping to the correct (src_table, tgt_table) pair
 //          using the optional src_table / tgt_table fields on ExactMatch /
@@ -495,6 +494,12 @@ export class UnionStrategy extends BaseStrategy {
 //          not specified.
 //
 // Fix #5: Noisy columns are detected per source table and skipped.
+//
+// Group-mode: When transaction_grouping is defined, uses carry-over streaming
+//   (like TransactionStrategy) instead of 1:1 row lookup. This supports N:1
+//   cases (e.g. 3 old tables → 1 new table) where there is no unique per-row
+//   anchor key. Old rows are paginated by anchor_key.old; target rows are
+//   fetched by transaction_grouping.keys.new (the shared group key).
 // ============================================================
 export class MultipleStrategy extends BaseStrategy {
   constructor(db: DatabaseService) { super(db); }
@@ -505,9 +510,10 @@ export class MultipleStrategy extends BaseStrategy {
     const { commonRule } = ctx;
     const { source, target } = commonRule.table_info;
     const sm = commonRule.schema_mappings;
+    const tg = commonRule.transaction_grouping;
     const tolerance = commonRule.defaults?.tolerance ?? 0;
     const anchorKeyOld = commonRule.anchor_key.old;
-    const anchorKeyNew = commonRule.anchor_key.new;
+    const chunkSize = parseInt(process.env.CHUNK_SIZE ?? '5000');
 
     const sources = source.split(',').map((s) => s.trim());
     const targets = target.split(',').map((t) => t.trim());
@@ -548,7 +554,139 @@ export class MultipleStrategy extends BaseStrategy {
       getOrCreate(m.src_table ?? defaultSrc, m.tgt_table ?? defaultTgt).concat!.push(m);
     }
 
-    // Process each pair independently
+    // ---- Group-mode: transaction_grouping defined → carry-over streaming ----
+    // Used when there is no unique per-row anchor key shared between old and new tables
+    // (e.g. 3 old tables → 1 new table, id is regenerated in new system).
+    // Old rows are paginated by anchor_key.old for keyset ordering.
+    // Target rows are fetched by transaction_grouping.keys.new (the shared group identifier).
+    if (tg) {
+      const oldKeyCol = tg.keys.old;
+      const newKeyCol = tg.keys.new;
+
+      for (const pair of pairMap.values()) {
+        const { srcTable, tgtTable, exact, transformed, concat } = pair;
+
+        this.logger.log(`[MULTIPLE:GROUP] Processing ${srcTable} → ${tgtTable} (grouped by [${oldKeyCol}])`);
+
+        // Noisy column detection
+        const allOldCols = [
+          ...(exact ?? []).map((m) => m.old),
+          ...(transformed ?? []).map((m) => m.old),
+          ...(concat ?? []).flatMap((m) => m.old_cols),
+        ];
+        const noisyMap = await this.detectNoisyColumns(srcTable, allOldCols);
+
+        // Anchor key uniqueness check (ensures keyset pagination works correctly)
+        const anchorDupErr = await this.checkAnchorKeyUnique(srcTable, anchorKeyOld);
+        if (anchorDupErr) {
+          errors.push(anchorDupErr);
+          this.logger.warn(`[MULTIPLE:GROUP] ${anchorDupErr.message}`);
+        }
+
+        let lastKey: unknown = null;
+        let carryOld = new Map<string, Record<string, unknown>[]>();
+        let carryNew = new Map<string, Record<string, unknown>[]>();
+
+        while (true) {
+          const oldChunk = await this.db.fetchChunk(srcTable, anchorKeyOld, chunkSize, lastKey);
+          if (oldChunk.length === 0) break;
+
+          // Collect unique group key values to fetch corresponding target rows
+          const groupKeyVals = [...new Set(oldChunk.map((r) => String(r[oldKeyCol] ?? '').trim()))];
+
+          // Fetch target rows by GROUP KEY (not by anchor key — old id has no match in new)
+          const newRows: Record<string, unknown>[] = [];
+          await this.db.streamRowsByKeys(tgtTable, newKeyCol, groupKeyVals, (row) => newRows.push(row));
+
+          // Seed group maps with carry-over from previous chunk
+          const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
+          const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
+          carryOld = new Map();
+          carryNew = new Map();
+
+          for (const row of oldChunk) {
+            const key = String(row[oldKeyCol] ?? '').trim();
+            if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
+            oldGroupMap.get(key)!.push(row);
+            rowsChecked++;
+          }
+          for (const row of newRows) {
+            const key = String(row[newKeyCol] ?? '').trim();
+            if (!newGroupMap.has(key)) newGroupMap.set(key, []);
+            newGroupMap.get(key)!.push(row);
+          }
+
+          const isLastChunk = oldChunk.length < chunkSize;
+          const carryKey = !isLastChunk ? [...oldGroupMap.keys()].at(-1) : undefined;
+          if (carryKey) {
+            carryOld.set(carryKey, oldGroupMap.get(carryKey)!);
+            if (newGroupMap.has(carryKey)) carryNew.set(carryKey, newGroupMap.get(carryKey)!);
+          }
+
+          // Compare all committed groups
+          for (const [groupKey, oldGroup] of oldGroupMap) {
+            if (groupKey === carryKey) continue;
+            const newGroup = newGroupMap.get(groupKey) ?? [];
+            if (newGroup.length === 0) {
+              errors.push({
+                errorType: 'ROW_MISSING',
+                groupKey,
+                message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}`,
+              });
+              continue;
+            }
+            errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, { exact, transformed, concat }, tolerance, noisyMap));
+            errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+          }
+
+          // Extra groups in target not present in this source
+          for (const [groupKey] of newGroupMap) {
+            if (groupKey === carryKey) continue;
+            if (!oldGroupMap.has(groupKey)) {
+              errors.push({
+                errorType: 'ROW_MISSING',
+                groupKey,
+                message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row)`,
+              });
+            }
+          }
+
+          lastKey = oldChunk[oldChunk.length - 1][anchorKeyOld];
+          if (isLastChunk) break;
+        }
+
+        // Flush carry
+        for (const [groupKey, oldGroup] of carryOld) {
+          const newGroup = carryNew.get(groupKey) ?? [];
+          if (newGroup.length === 0) {
+            errors.push({
+              errorType: 'ROW_MISSING',
+              groupKey,
+              message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}`,
+            });
+            continue;
+          }
+          errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, { exact, transformed, concat }, tolerance, noisyMap));
+          errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+        }
+        for (const [groupKey] of carryNew) {
+          if (!carryOld.has(groupKey)) {
+            errors.push({
+              errorType: 'ROW_MISSING',
+              groupKey,
+              message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row in carry)`,
+            });
+          }
+        }
+      }
+
+      this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
+      return { errors, rowsChecked };
+    }
+
+    // ---- Row-mode: no transaction_grouping → 1:1 anchor key lookup (original behavior) ----
+    const anchorKeyNew = commonRule.anchor_key.new;
+
     for (const pair of pairMap.values()) {
       const { srcTable, tgtTable, exact, transformed, concat } = pair;
 
@@ -562,9 +700,7 @@ export class MultipleStrategy extends BaseStrategy {
       ];
       const noisyMap = await this.detectNoisyColumns(srcTable, allOldCols);
 
-      // Stream old rows, look up matching new rows by anchor key
       let lastKey: unknown = null;
-      const chunkSize = parseInt(process.env.CHUNK_SIZE ?? '5000');
 
       while (true) {
         const oldChunk = await this.db.fetchChunk(srcTable, anchorKeyOld, chunkSize, lastKey);
@@ -663,5 +799,79 @@ export class MultipleStrategy extends BaseStrategy {
 
     this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
     return { errors, rowsChecked };
+  }
+
+  // ----------------------------------------------------------------
+  // Group-mode aggregate comparison (used in group-mode path)
+  // ----------------------------------------------------------------
+
+  private validateGroup(
+    groupKey: string,
+    oldGroup: Record<string, unknown>[],
+    newGroup: Record<string, unknown>[],
+    mappings: {
+      exact: ExactMatch[] | undefined;
+      transformed: TransformedMatch[] | undefined;
+      concat: ConcatMatch[] | undefined;
+    },
+    tolerance: number,
+    noisyMap: Map<string, NoisyColumnType>,
+  ): ValidationError[] {
+    const errors: ValidationError[] = [];
+
+    for (const m of mappings.exact ?? []) {
+      if (this.isNoisyType(noisyMap.get(m.old))) continue;
+      const oldTotal = this.sumColumn(oldGroup, m.old);
+      const newTotal = this.sumColumn(newGroup, m.new);
+      if (oldTotal !== null && newTotal !== null && Math.abs(oldTotal - newTotal) > tolerance) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: m.old,
+          newColumn: m.new,
+          oldValue: oldTotal,
+          newValue: newTotal,
+          groupKey,
+          message: `[MULTIPLE] Group sum mismatch [${m.old}→${m.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
+        });
+      }
+    }
+
+    for (const m of mappings.transformed ?? []) {
+      if (this.isNoisyType(noisyMap.get(m.old))) continue;
+      const oldTotal = this.sumColumn(oldGroup, m.old);
+      const newTotal = this.sumColumn(newGroup, m.new);
+      if (oldTotal !== null && newTotal !== null && Math.abs(oldTotal - newTotal) > tolerance) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: m.old,
+          newColumn: m.new,
+          oldValue: oldTotal,
+          newValue: newTotal,
+          groupKey,
+          message: `[MULTIPLE] Group transform mismatch [${m.old}→${m.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
+        });
+      }
+    }
+
+    for (const m of mappings.concat ?? []) {
+      if (m.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
+      // concat in group mode: concatenate all distinct old values, compare to all distinct new values
+      const sep = m.separator ?? '';
+      const oldVals = [...new Set(oldGroup.map((r) => m.old_cols.map((c) => String(r[c] ?? '').trim()).join(sep)))].sort().join('|');
+      const newVals = [...new Set(newGroup.map((r) => String(r[m.new] ?? '').trim()))].sort().join('|');
+      if (oldVals !== newVals) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: m.old_cols.join('+'),
+          newColumn: m.new,
+          oldValue: oldVals,
+          newValue: newVals,
+          groupKey,
+          message: `[MULTIPLE] Group concat mismatch [${m.old_cols.join('+')}→${m.new}] (group: ${groupKey})`,
+        });
+      }
+    }
+
+    return errors;
   }
 }

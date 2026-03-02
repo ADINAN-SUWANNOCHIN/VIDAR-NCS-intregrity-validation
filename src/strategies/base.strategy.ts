@@ -15,6 +15,12 @@ export abstract class BaseStrategy {
 
   protected readonly FALLBACK_SIMILARITY_THRESHOLD = 0.9;
 
+  // Common name variants for the affect code column (case-insensitive check)
+  protected static readonly AFFECT_CODE_VARIANTS = [
+    'affectcode', 'affect_code', 'afcode', 'affcode',
+    'affect_cd',  'affectcd',   'af_code', 'aff_code',
+  ];
+
   constructor(db: DatabaseService) {
     this.db = db;
     this.logger = new Logger(this.constructor.name);
@@ -232,5 +238,246 @@ export abstract class BaseStrategy {
       // Silently skip if the check itself fails (e.g. cross-db permission issues)
       return null;
     }
+  }
+
+  // ----------------------------------------------------------------
+  // Def rule evaluation (shared by TransactionStrategy and group-mode MultipleStrategy)
+  // ----------------------------------------------------------------
+
+  protected runDefRules(
+    groupKey: string,
+    oldGroup: Record<string, unknown>[],
+    newGroup: Record<string, unknown>[],
+    defRules: DefRule[],
+    affectCodeMap: Map<string, string>,
+    tolerance: number,
+  ): ValidationError[] {
+    const errors: ValidationError[] = [];
+
+    for (const def of defRules) {
+      if (def.trigger_condition?.must_have_all || def.trigger_condition?.must_have_any) {
+        const oldAffectCodes = this.extractAffectCodes(oldGroup, affectCodeMap);
+
+        if (def.trigger_condition.must_have_all) {
+          const hasAll = def.trigger_condition.must_have_all.every((code) =>
+            oldAffectCodes.has(code),
+          );
+          if (!hasAll) continue;
+        }
+
+        if (def.trigger_condition.must_have_any) {
+          const hasAny = def.trigger_condition.must_have_any.some((code) =>
+            oldAffectCodes.has(code),
+          );
+          if (!hasAny) continue;
+        }
+      }
+
+      for (const action of def.actions) {
+        errors.push(...this.evaluateDefAction(def.def_id, groupKey, oldGroup, newGroup, action, tolerance));
+      }
+    }
+
+    return errors;
+  }
+
+  protected evaluateDefAction(
+    defId: string,
+    groupKey: string,
+    oldGroup: Record<string, unknown>[],
+    newGroup: Record<string, unknown>[],
+    action: any,
+    tolerance: number,
+  ): ValidationError[] {
+    const errors: ValidationError[] = [];
+
+    if (action.check_type === 'ROW_LEVEL_COHESION') {
+      const resolvedVars: Record<string, number> = {};
+
+      // C5: evaluateExpression throws on unparseable expression — catch here so other DEF
+      // rules in the same group still run (error is recorded, not propagated).
+      try {
+        for (const [varName, expr] of Object.entries(action.variables ?? {})) {
+          resolvedVars[varName] = this.evaluateExpression(String(expr), oldGroup);
+        }
+      } catch (e: any) {
+        errors.push({
+          errorType: 'TRANSFORM_ERROR',
+          defId,
+          groupKey,
+          message: `DEF rule expression error (${defId}): ${e.message}`,
+        });
+        return errors;
+      }
+
+      const conditionMet = this.evaluateCondition(action.condition, newGroup, resolvedVars, tolerance);
+      if (!conditionMet) {
+        errors.push({
+          errorType: 'DEFECT_VIOLATION',
+          defId,
+          groupKey,
+          message: action.error_message,
+        });
+      }
+    }
+
+    if (action.check_type === 'FIELD_VALUE_CHECK') {
+      // Variables:
+      //   new_col: column in new rows to validate
+      //   old_col: column in old rows (optional, for skip-count logic)
+      //   skip_if_old_equals: literal value — if old row's old_col equals this, it "permits"
+      //                       one matching bad value in new (e.g. old CONV rows → new CONV allowed)
+      //   fail_if_new_matches: regex pattern — any new row whose new_col matches this fails
+      const newCol: string = action.variables?.new_col ?? '';
+      const oldCol: string = action.variables?.old_col ?? '';
+      const skipIfOldEquals: string = action.variables?.skip_if_old_equals ?? '';
+      const failPattern: string = action.variables?.fail_if_new_matches ?? '';
+
+      if (!newCol || !failPattern) {
+        errors.push({
+          errorType: 'TRANSFORM_ERROR',
+          defId,
+          groupKey,
+          message: `DEF ${defId}: FIELD_VALUE_CHECK requires variables.new_col and variables.fail_if_new_matches`,
+        });
+        return errors;
+      }
+
+      let regex: RegExp;
+      try {
+        regex = new RegExp(failPattern, 'i');
+      } catch {
+        errors.push({
+          errorType: 'TRANSFORM_ERROR',
+          defId,
+          groupKey,
+          message: `DEF ${defId}: FIELD_VALUE_CHECK — invalid regex pattern: "${failPattern}"`,
+        });
+        return errors;
+      }
+
+      // Count how many old rows have the skip value — each permits one bad new row
+      const skipCount = (skipIfOldEquals && oldCol)
+        ? oldGroup.filter((r) =>
+            String(r[oldCol] ?? '').trim().toUpperCase() === skipIfOldEquals.toUpperCase(),
+          ).length
+        : 0;
+
+      // Collect bad new rows (those whose new_col matches the fail pattern)
+      const badNewRows = newGroup.filter((r) => regex.test(String(r[newCol] ?? '').trim()));
+      const badCount = badNewRows.length;
+
+      const excessBad = badCount - skipCount;
+      if (excessBad > 0) {
+        // Distinct bad new values — what actually ended up in new (useful for report)
+        const badNewVals = [...new Set(badNewRows.map((r) => String(r[newCol] ?? '').trim()))];
+
+        // Distinct old values that SHOULD have been converted
+        // (old values that are NOT the skip value — these are the original codes to fix)
+        const unconvertedOldVals = (oldCol && oldGroup.length > 0)
+          ? [
+              ...new Set(
+                oldGroup
+                  .filter((r) =>
+                    skipIfOldEquals
+                      ? String(r[oldCol] ?? '').trim().toUpperCase() !== skipIfOldEquals.toUpperCase()
+                      : true,
+                  )
+                  .map((r) => String(r[oldCol] ?? '').trim())
+                  .filter((v) => v !== ''),
+              ),
+            ]
+          : [];
+
+        const detail = unconvertedOldVals.length > 0
+          ? `old ${oldCol}: [${unconvertedOldVals.join(', ')}] → new ${newCol}: [${badNewVals.join(', ')}]`
+          : `new ${newCol}: [${badNewVals.join(', ')}]`;
+
+        errors.push({
+          errorType: 'DEFECT_VIOLATION',
+          defId,
+          groupKey,
+          message: `${action.error_message} — ${detail}`,
+        });
+      }
+    }
+
+    return errors;
+  }
+
+  protected evaluateExpression(expr: string, rows: Record<string, unknown>[]): number {
+    const sumMatch = expr.match(/SUM\((?:old\.)?(\w+)\)\s+WHERE\s+(\w+)\s*==\s*'([^']+)'/i);
+    if (sumMatch) {
+      const [, col, filterCol, filterVal] = sumMatch;
+      return rows
+        .filter((r) => String(r[filterCol] ?? '').toUpperCase() === filterVal.toUpperCase())
+        .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
+    }
+    // C5: throw instead of silently returning 0 — caller (evaluateDefAction) catches this
+    // and records a TRANSFORM_ERROR so the malformed expression is visible in the report.
+    throw new Error(
+      `DEF rule expression not parseable: "${expr}" — ` +
+      `supported format: SUM(old.columnName) WHERE filterColumn == 'value'`,
+    );
+  }
+
+  protected evaluateCondition(
+    condition: string,
+    newGroup: Record<string, unknown>[],
+    vars: Record<string, number>,
+    tolerance: number,
+  ): boolean {
+    const checks: Array<{ col: string; varName: string }> = [];
+    const pattern = /target\.(\w+)\s*==\s*(val_\w+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(condition)) !== null) {
+      checks.push({ col: match[1], varName: match[2] });
+    }
+    if (checks.length === 0) return true;
+    return newGroup.some((row) =>
+      checks.every((chk) => {
+        const expected = vars[chk.varName] ?? 0;
+        const actual = parseFloat(String(row[chk.col] ?? 0)) || 0;
+        return Math.abs(actual - expected) <= tolerance;
+      }),
+    );
+  }
+
+  protected sumColumn(rows: Record<string, unknown>[], col: string): number | null {
+    const vals = rows.map((r) => r[col]).filter((v) => v !== null && v !== undefined);
+    if (vals.length === 0) return null;
+    const nums = vals.map((v) => parseFloat(String(v)));
+    if (nums.some(isNaN)) return null;
+    return nums.reduce((a, b) => a + b, 0);
+  }
+
+  protected extractAffectCodes(
+    rows: Record<string, unknown>[],
+    affectCodeMap: Map<string, string>,
+  ): Set<string> {
+    const codeSet = new Set<string>();
+    if (rows.length === 0) return codeSet;
+
+    // Locate the affect code column once — handles any casing and all known name variants.
+    const rowKeys = Object.keys(rows[0]);
+    const colName = rowKeys.find((k) =>
+      BaseStrategy.AFFECT_CODE_VARIANTS.includes(k.toLowerCase()),
+    );
+
+    if (!colName) {
+      this.logger.warn(
+        `No affect code column found (checked: ${BaseStrategy.AFFECT_CODE_VARIANTS.join(', ')}) — ` +
+        `trigger_condition checks will be skipped`,
+      );
+      return codeSet;
+    }
+
+    for (const row of rows) {
+      const val = row[colName];
+      if (val == null) continue;
+      const str = String(val).toUpperCase();
+      if (affectCodeMap.has(str)) codeSet.add(str);
+    }
+    return codeSet;
   }
 }

@@ -1,42 +1,73 @@
 # ============================================================
-# Test Case 1: UNION (3 OLD → 1 NEW) + Transaction Grouping
+# Case 1: MULTIPLE 3:1 (Transaction)
 # conv$vinpahistory + conv$vinpalrentalhistory + conv$vinpalrtrespasserhist
 #   → la$lahistloantransactionhistory
 #
-# Row count check: 2,556,928 + 147 + 11 = 2,557,086 (exact match confirmed)
+# Row counts (verified from data discovery):
+#   conv$vinpahistory:          2,556,928 rows
+#   conv$vinpalrentalhistory:         147 rows
+#   conv$vinpalrtrespasserhist:        11 rows
+#   la$lahistloantransactionhistory: (sum of all 3)
 #
-# Column notes (from real data inspection):
-#   - billno:   old="200811", new="20081121150000434" (billno+accountno CONCAT — skip for now)
-#   - noofdays: old="" nvarchar, new=null int — empty-string-vs-null edge case
-#   - startinterestdate/endinterestdate: old="" nvarchar, new=null datetime2 — same edge case
-#   - interestrate: old="" nvarchar (often empty), new=0 decimal — skip for now
-#   - Some columns only exist in conv$vinpahistory, not in all 3 source tables
+# Key findings from sample data:
+#   - Group keys (systemreferencenumber) are MUTUALLY EXCLUSIVE across the 3 sources
+#     → each group key appears in exactly one old table. Per-pair comparison is safe.
+#   - old.newaccountno → new.accountno  (old.accountno is old-format "PSA..." NOT used in new)
+#   - old.loantransaction → new.loantranshostcode  (loantransactionhistorycode is always empty)
+#   - old.auxilarytransactioncode → new.auxilarytranscode
+#   - old.systemreferencenumber → new.systemreferenceno  (group key, also maps as data)
+#   - old.receiptnumber → new.receiptno
+#   - old.ratevariance → new.varianceamount
+#   - old.installment → new.installmentamount
+#   - old.calculaterate → new.calculateintrate
+#   - old.ratevariancecode → new.variancecode
+#   - billno: excluded — old format "200811" vs new "20081121150000434" (concat of billno+accountno)
+#   - inputsourcesystem: only in vinpahistory + vinpalrtrespasserhist, NOT in vinpalrentalhistory
+#   - costnpaamountb4t, interestb4t, unearnedprofitamountb4t: NOT in vinpalrentalhistory
+#   - startinterestdate, endinterestdate: empty nvarchar vs null datetime2 — excluded
+#   - noofdays: old=nvarchar (often empty) vs new=null int — excluded for now
+#   - interestrate: old="" empty vs new=0 decimal — excluded for now
+#
+# Def rules:
+#   - def01:  PP+QQ group cohesion check (ROW_LEVEL_COHESION)
+#   - def001: Teller ID conversion check (FIELD_VALUE_CHECK) — global or table-specific
 # ============================================================
 
 table_info:
-  # Comma-separated for UNION: all 3 source tables
+  # Comma-separated: 3 old tables mapping to 1 new table
   source: "[ncs-conv-aging].dbo.[conv$vinpahistory],[ncs-conv-aging].dbo.[conv$vinpalrentalhistory],[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
   target: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
-  table_type: UNION
+  table_type: MULTIPLE
 
-# Anchor key used for cursor-based (keyset) streaming — never OFFSET
+# anchor_key: used ONLY for keyset pagination ordering within each source table.
+# In group-mode (transaction_grouping defined), new rows are fetched by group key — NOT by anchorKeyNew.
+# id is auto-increment and unique per row in every source table → safe for keyset streaming.
 anchor_key:
-  old: newaccountno       # old system stores the new account number here
-  new: accountno
+  old: id
+  new: id   # not used for fetching in group-mode; placeholder required by schema
 
-# Transaction grouping: compare per systemreferencenumber group
+# Group-mode: carry-over streaming by systemreferencenumber.
+# Old rows are paginated by anchor_key.old (id), grouped by tg.keys.old.
+# New rows are fetched WHERE tg.keys.new = groupKey (no anchor-key join needed).
 transaction_grouping:
   keys:
     old: systemreferencenumber
     new: systemreferenceno
 
 defaults:
-  tolerance: 0.01         # allow 0.01 rounding difference on decimal amounts
+  tolerance: 0.01   # allow 0.01 rounding difference on decimal amounts
 
 schema_mappings:
 
-  # Direct 1:1 column matches (name may differ, data identical)
+  # ---- Column name mappings (direct value comparison, no transform) ----
+  # Mappings WITHOUT src_table → default to first source (conv$vinpahistory).
+  # All 3 sources share these column names and semantics.
+  #
+  # Note: non-numeric string columns (debitcredit, affectcode, etc.) are included for
+  # documentation and row-mode compatibility. In group-mode, only numeric columns
+  # (those where sumColumn returns a number) generate VALUE_MISMATCH errors.
   exact_matches:
+    # Account number: old stores new-system number in newaccountno, NOT accountno
     - old: newaccountno
       new: accountno
 
@@ -53,22 +84,19 @@ schema_mappings:
       new: debitcredit
 
     - old: tellerid
-      new: tellerid
+      new: tellerid                   # further validated by def001 (FIELD_VALUE_CHECK)
 
     - old: systemreferencenumber
-      new: systemreferenceno          # column renamed
+      new: systemreferenceno          # column renamed; also the group key
 
     - old: receiptnumber
       new: receiptno                  # column renamed
 
-    - old: inputsourcesystem
-      new: channel                    # column renamed (verified: "TRF" → "TRF")
-
     - old: currentbalanceb4t
       new: currentbalanceb4t
 
-    - old: interestb4t
-      new: interestb4t
+    - old: nextpaymentduedateb4t
+      new: nextpaymentduedateb4t
 
     - old: planno
       new: planno
@@ -88,26 +116,129 @@ schema_mappings:
     - old: tempid
       new: tempid
 
-    # NOTE: billno is excluded — old="200811", new="20081121150000434"
-    # (new billno = old billno + newaccountno CONCAT; needs custom transform)
+    - old: ratevariancecode
+      new: variancecode               # column renamed
 
-  # Amount columns: old = nvarchar ("5179.46"), new = decimal (5179.46)
-  # isEqual() uses parseFloat on both sides — tolerance 0.01 handles rounding
+    # NOTE: billno excluded — old="200811" vs new="20081121150000434"
+    #   (new concatenates billno + accountno; needs custom transform — defer)
+    # NOTE: planno not in conv$vinpalrentalhistory — safe (only checked in vinpahistory pair)
+
+    # ---- Ensure conv$vinpalrentalhistory and conv$vinpalrtrespasserhist are in pairMap ----
+    # At least one mapping per source is required to create a pair entry in the engine.
+    # Groups from rental/respasserhist are otherwise silently excluded from ALL checks.
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+  # ---- Amount columns: old = nvarchar string ("5179.46"), new = decimal ----
+  # isEqual() uses parseFloat on both sides → tolerance 0.01 handles rounding.
+  # Repeated for each source so all 3 sources get amount validation.
   transformed_matches:
+    # transactionamount: present in all 3 sources
     - old: transactionamount
       new: transactionamount
       transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpahistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    # currentbalanceb4t: present in all 3 sources
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+    # (vinpahistory currentbalanceb4t handled via exact_matches above — falls back to vinpahistory pair)
+
+    # costnpaamountb4t: in vinpahistory + vinpalrtrespasserhist only (NOT in vinpalrentalhistory)
+    - old: costnpaamountb4t
+      new: costnpaamountb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
 
     - old: costnpaamountb4t
       new: costnpaamountb4t
+      transform_rule: NONE
+
+    - old: interestb4t
+      new: interestb4t
       transform_rule: NONE
 
     - old: unearnedprofitamountb4t
       new: unearnedprofitamountb4t
       transform_rule: NONE
 
-    # Date columns: old = "2008-11-30" (nvarchar), new = datetime2
-    # DATE_TO_DATETIME normalizes to YYYY-MM-DD for comparison
+    # interestb4t + unearnedprofitamountb4t for vinpalrtrespasserhist
+    - old: interestb4t
+      new: interestb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: unearnedprofitamountb4t
+      new: unearnedprofitamountb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    # Renamed amount/numeric columns (vinpahistory only — not present in rental; respasserhist has them)
+    - old: ratevariance
+      new: varianceamount             # column renamed
+      transform_rule: NONE
+
+    - old: installment
+      new: installmentamount          # column renamed
+      transform_rule: NONE
+
+    - old: calculaterate
+      new: calculateintrate           # column renamed
+      transform_rule: NONE
+
+    # ratevariance/installment/calculaterate for vinpalrtrespasserhist
+    - old: ratevariance
+      new: varianceamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: installment
+      new: installmentamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: calculaterate
+      new: calculateintrate
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    # Date columns: old = nvarchar date string, new = datetime2
+    # DATE_TO_DATETIME normalizes both to YYYY-MM-DD for comparison
     - old: transactiondate
       new: transactiondate
       transform_rule: DATE_TO_DATETIME
@@ -116,15 +247,10 @@ schema_mappings:
       new: effectivedate
       transform_rule: DATE_TO_DATETIME
 
-    - old: nextpaymentduedateb4t
-      new: nextpaymentduedateb4t
-      transform_rule: DATE_TO_DATETIME
-
     - old: gldate
       new: gldate
       transform_rule: DATE_TO_DATETIME
 
-    # NOTE: startinterestdate, endinterestdate excluded —
-    # old="" empty nvarchar vs new=null datetime2 (empty-string-vs-null edge case)
-    # NOTE: noofdays excluded — old="" nvarchar vs new=null int (same edge case)
-    # NOTE: interestrate excluded — old="" empty vs new=0 decimal (empty-as-zero edge case)
+    # NOTE: startinterestdate, endinterestdate — excluded: old="" nvarchar vs new=null datetime2
+    # NOTE: noofdays — excluded: old="" nvarchar vs new=null int (empty-vs-null edge case)
+    # NOTE: interestrate — excluded: old="" empty vs new=0 decimal (empty-as-zero edge case)
