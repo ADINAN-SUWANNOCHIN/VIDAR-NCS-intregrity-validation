@@ -1,0 +1,36 @@
+# Global DEF 001 — Teller ID conversion check
+#
+# Purpose: Verify that teller IDs were properly converted from the old system.
+#   - Old rows where tellerid = 'CONV' are "conversion records" — they are
+#     allowed to produce new rows that also have CONV-style tellerids.
+#   - Old rows where tellerid != 'CONV' must produce new rows with a real
+#     teller ID (not matching the CONV pattern).
+#
+# This def is global and reusable across any TRANSACTION or MULTIPLE (group-mode)
+# table that has a tellerid column. Table-specific defs with the same def_id
+# (def001) override this global one.
+#
+# Usage: include "def001" in the def_list when running validation for any table
+#        that requires teller ID conversion checks.
+#
+# Variables to adjust per table (override in table-specific def001.yaml if needed):
+#   new_col: name of tellerid column in the NEW table
+#   old_col: name of tellerid column in the OLD table
+#   skip_if_old_equals: value in old_col that marks a conversion record (default: CONV)
+#   fail_if_new_matches: regex pattern — new tellerid fails if it matches this
+
+def_id: def001
+target_scope: transaction_group
+actions:
+  - step: "1"
+    check_type: FIELD_VALUE_CHECK
+    variables:
+      new_col: tellerid
+      old_col: tellerid
+      skip_if_old_equals: CONV
+      fail_if_new_matches: "^\\d+$|^\\*|^CONV$"
+    condition: valid
+    error_message: >
+      Teller ID conversion issue: new table contains rows with tellerid='CONV'
+      that do not correspond to old CONV conversion records.
+      Expected: real teller IDs in new system. Check ETL teller ID mapping logic.

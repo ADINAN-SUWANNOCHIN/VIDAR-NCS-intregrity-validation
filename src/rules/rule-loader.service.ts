@@ -64,6 +64,8 @@ export class RuleLoaderService {
 
   // ----------------------------------------------------------------
   // Def Rules (.yaml) – โหลดทุก def ของ table หรือเฉพาะ defIds
+  // Also merges global defs from rules/global/defs/ so a def defined once
+  // is reusable across any table without copying the YAML.
   // ----------------------------------------------------------------
   loadDefRules(tableName: string, defIds?: string[]): DefRule[] {
     // M3: sort a copy of defIds so cache key is order-independent.
@@ -74,30 +76,50 @@ export class RuleLoaderService {
       return this.defRuleCache.get(cacheKey)!;
     }
 
+    const rules: DefRule[] = [];
+
+    // 1. Load table-specific defs
     const defDir = path.join(this.rulesDir, 'tables', tableName, 'def');
-    if (!fs.existsSync(defDir)) {
+    if (fs.existsSync(defDir)) {
+      rules.push(...this.readDefYamls(defDir, defIds, `table:${tableName}`));
+    } else {
       this.logger.warn(`No def directory for table: ${tableName}`);
-      return [];
     }
 
-    const allFiles = fs.readdirSync(defDir).filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'));
-
-    const rules: DefRule[] = [];
-    for (const file of allFiles) {
-      const defId = path.basename(file, path.extname(file)); // เช่น "def01"
-      if (defIds && !defIds.includes(defId)) continue;
-
-      try {
-        const raw = fs.readFileSync(path.join(defDir, file), 'utf-8');
-        const parsed = yaml.load(raw) as DefRule;
-        parsed.def_id = defId;
-        rules.push(parsed);
-      } catch (err) {
-        this.logger.error(`Failed to parse def ${file} for ${tableName}: ${err.message}`);
+    // 2. Merge global defs — only include those not already loaded (table-specific takes priority)
+    const globalDefDir = path.join(this.rulesDir, 'global', 'defs');
+    if (fs.existsSync(globalDefDir)) {
+      const loadedIds = new Set(rules.map((r) => r.def_id));
+      const globalRules = this.readDefYamls(globalDefDir, defIds, 'global');
+      for (const rule of globalRules) {
+        if (!loadedIds.has(rule.def_id)) {
+          rules.push(rule);
+        }
       }
     }
 
     this.defRuleCache.set(cacheKey, rules);
+    return rules;
+  }
+
+  private readDefYamls(dir: string, defIds: string[] | undefined, context: string): DefRule[] {
+    const rules: DefRule[] = [];
+    const allFiles = fs.readdirSync(dir).filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'));
+
+    for (const file of allFiles) {
+      const defId = path.basename(file, path.extname(file));
+      if (defIds && !defIds.includes(defId)) continue;
+
+      try {
+        const raw = fs.readFileSync(path.join(dir, file), 'utf-8');
+        const parsed = yaml.load(raw) as DefRule;
+        parsed.def_id = defId;
+        rules.push(parsed);
+      } catch (err) {
+        this.logger.error(`Failed to parse def ${file} (${context}): ${err.message}`);
+      }
+    }
+
     return rules;
   }
 
