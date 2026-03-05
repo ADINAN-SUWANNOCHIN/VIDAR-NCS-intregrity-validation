@@ -1,0 +1,91 @@
+# ============================================================
+# Case 2 — Source 3/5: conv$vinpalnsbthistory  (SBT)
+# Target: la$lahisthloantransactionhistoryh
+# Table type: TRANSACTION (group-mode by systemreferenceno)
+#
+# IMPORTANT: This table uses column name `systemreferenceno` (already matches
+# new table) unlike the other 4 sources which use `systemreferencenumber`.
+# Therefore transaction_grouping.keys.old = systemreferenceno (no rename).
+#
+# Key findings (Sheet 4 of 4COMMON2.xlsx, Q5 SQL confirmed):
+#   - sbttotalamount = interest33 (same value) → use sbttotalamount only
+#   - sbttotalamount → totaltax: SUM comparison works (other source rows = 0)
+#   - sbtrevenue → sbtamount, sbtrevenueamount → localtax: VERIFIED (Set Match)
+#   - principleb4t → currentbalanceb4t: VERIFIED
+#   - interestpaid: SPLIT → creditinterestamount/debitinterestamount, direction unclear — excluded
+#   - accountno: old format (PSA prefix) — EXCLUDED (newaccountno is correct)
+#   - inputsourcesystem → interestrate: AI error — excluded
+#   - EMPTY_COLUMN: accounttype, sbtinterest, ordernumber, sbtratio, citratio, remark
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
+  target: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+  table_type: TRANSACTION
+
+anchor_key:
+  old: id
+  new: id
+
+transaction_grouping:
+  keys:
+    old: systemreferenceno   # same name as new table — no rename needed
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+    - old: newaccountno
+      new: accountno
+
+    - old: systemreferenceno
+      new: systemreferenceno            # same name, group key
+
+    - old: tellerid
+      new: tellerid                     # VERIFIED (Set Match)
+
+    - old: currency
+      new: currency
+
+    - old: accountbranch
+      new: accountbranch                # AI_VERIFIED
+
+    - old: servicebranch
+      new: servicebranch                # AI_VERIFIED
+
+  transformed_matches:
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE              # AI_VERIFIED
+
+    - old: interestb4t
+      new: interestb4t
+      transform_rule: NONE
+
+    - old: sbttotalamount
+      new: totaltax                     # Q5: SUM match confirmed
+      transform_rule: NONE
+
+    - old: sbtrevenue
+      new: sbtamount                    # VERIFIED (Set Match)
+      transform_rule: NONE
+
+    - old: sbtrevenueamount
+      new: localtax                     # VERIFIED (Set Match)
+      transform_rule: NONE
+
+    - old: principleb4t
+      new: currentbalanceb4t            # VERIFIED (Set Match)
+      transform_rule: NONE
+
+    # Date columns
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME

@@ -1,0 +1,31 @@
+name: Rights NPA
+module: npa
+description: "NPA rights tables (la$ prefix). Run all cases or filter by case_name/sources."
+
+cases:
+  # ---------------------------------------------------------------
+  # Case 1: MULTIPLE 3:1
+  # conv$vinpahistory + conv$vinpalrentalhistory + conv$vinpalrtrespasserhist
+  #   → la$lahistloantransactionhistory
+  # Note: rental and respasserhist are handled internally by the MULTIPLE
+  # strategy inside conv$vinpahistory common.yaml. Only the primary table
+  # needs to be listed here.
+  # ---------------------------------------------------------------
+  - name: lahistloantransactionhistory
+    rule_path: rights_npa/lahistloantransactionhistory
+    tables:
+      - "conv$vinpahistory"
+
+  # ---------------------------------------------------------------
+  # Case 2: 5 sources → la$lahisthloantransactionhistoryh
+  # Each source is validated independently (TRANSACTION type, group SUM).
+  # Groups overlap across sources so separate YAMLs are required.
+  # ---------------------------------------------------------------
+  - name: lahisthloantransactionhistoryh
+    rule_path: rights_npa/lahisthloantransactionhistoryh
+    tables:
+      - "conv$vinpahistory"
+      - "conv$vinpainvcithistoryh"
+      - "conv$vinpalnsbthistory"
+      - "conv$vinpalrentalhistory"
+      - "conv$vinpalrtrespasserhist"

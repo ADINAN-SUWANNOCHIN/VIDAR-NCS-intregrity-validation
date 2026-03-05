@@ -1,6 +1,9 @@
 name: TAX
-module: NPA
-description: Tax related tables
-tables:
-  - table_name: PLACEHOLDER_NPA_TAX_TABLE_1
-  - table_name: PLACEHOLDER_NPA_TAX_TABLE_2
+module: npa
+description: "PLACEHOLDER — fill table names once mapping is confirmed."
+
+cases:
+  - name: placeholder
+    rule_path: PLACEHOLDER_npa_tax
+    tables:
+      - PLACEHOLDER_TABLE_1
