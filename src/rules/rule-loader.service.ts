@@ -20,6 +20,18 @@ export class RuleLoaderService {
   }
 
   // ----------------------------------------------------------------
+  // Resolve the directory for a table's rules.
+  // If rulePath is provided:  {rulesDir}/{rulePath}/{tableName}/
+  // Fallback (legacy):        {rulesDir}/tables/{tableName}/
+  // ----------------------------------------------------------------
+  private resolveTableDir(tableName: string, rulePath?: string): string {
+    if (rulePath) {
+      return path.join(this.rulesDir, rulePath, tableName);
+    }
+    return path.join(this.rulesDir, 'tables', tableName);
+  }
+
+  // ----------------------------------------------------------------
   // Global Affect Codes
   // ----------------------------------------------------------------
   loadGlobalAffectCodes(): GlobalAffectCodes {
@@ -28,7 +40,7 @@ export class RuleLoaderService {
     const filePath = path.join(this.rulesDir, 'global', 'affect_codes.json');
     if (!fs.existsSync(filePath)) {
       this.logger.warn(`affect_codes.json not found at ${filePath}, using empty set`);
-      this.globalAffectCodes = { codes: [] }; // L4: cache so fs.existsSync is not repeated per table
+      this.globalAffectCodes = { codes: [] };
       return this.globalAffectCodes;
     }
 
@@ -38,14 +50,17 @@ export class RuleLoaderService {
   }
 
   // ----------------------------------------------------------------
-  // Common Rule (.ini)
+  // Common Rule
+  // rulePath: e.g. "rights_npa/lahistloantransactionhistory"
   // ----------------------------------------------------------------
-  loadCommonRule(tableName: string): CommonRule | null {
-    if (this.commonRuleCache.has(tableName)) {
-      return this.commonRuleCache.get(tableName) ?? null;
+  loadCommonRule(tableName: string, rulePath?: string): CommonRule | null {
+    const cacheKey = `${rulePath ?? '__legacy__'}::${tableName}`;
+    if (this.commonRuleCache.has(cacheKey)) {
+      return this.commonRuleCache.get(cacheKey) ?? null;
     }
 
-    const filePath = path.join(this.rulesDir, 'tables', tableName, 'common.yaml');
+    const tableDir = this.resolveTableDir(tableName, rulePath);
+    const filePath = path.join(tableDir, 'common.yaml');
     if (!fs.existsSync(filePath)) {
       this.logger.warn(`No common.yaml found for table: ${tableName} at ${filePath}`);
       return null;
@@ -54,7 +69,7 @@ export class RuleLoaderService {
     try {
       const raw = fs.readFileSync(filePath, 'utf-8');
       const parsed = yaml.load(raw) as CommonRule;
-      this.commonRuleCache.set(tableName, parsed);
+      this.commonRuleCache.set(cacheKey, parsed);
       return parsed;
     } catch (err) {
       this.logger.error(`Failed to parse common.yaml for ${tableName}: ${err.message}`);
@@ -63,30 +78,26 @@ export class RuleLoaderService {
   }
 
   // ----------------------------------------------------------------
-  // Def Rules (.yaml) – โหลดทุก def ของ table หรือเฉพาะ defIds
-  // Also merges global defs from rules/global/defs/ so a def defined once
-  // is reusable across any table without copying the YAML.
+  // Def Rules
   // ----------------------------------------------------------------
-  loadDefRules(tableName: string, defIds?: string[]): DefRule[] {
-    // M3: sort a copy of defIds so cache key is order-independent.
-    // ['def02','def01'] and ['def01','def02'] refer to the same set — same result should be cached.
+  loadDefRules(tableName: string, defIds?: string[], rulePath?: string): DefRule[] {
     const sortedIds = defIds ? [...defIds].sort() : ['*'];
-    const cacheKey = `${tableName}::${sortedIds.join(',')}`;
+    const cacheKey = `${rulePath ?? '__legacy__'}::${tableName}::${sortedIds.join(',')}`;
     if (this.defRuleCache.has(cacheKey)) {
       return this.defRuleCache.get(cacheKey)!;
     }
 
     const rules: DefRule[] = [];
 
-    // 1. Load table-specific defs
-    const defDir = path.join(this.rulesDir, 'tables', tableName, 'def');
+    // 1. Table-specific defs
+    const defDir = path.join(this.resolveTableDir(tableName, rulePath), 'def');
     if (fs.existsSync(defDir)) {
       rules.push(...this.readDefYamls(defDir, defIds, `table:${tableName}`));
     } else {
       this.logger.warn(`No def directory for table: ${tableName}`);
     }
 
-    // 2. Merge global defs — only include those not already loaded (table-specific takes priority)
+    // 2. Global defs — table-specific takes priority
     const globalDefDir = path.join(this.rulesDir, 'global', 'defs');
     if (fs.existsSync(globalDefDir)) {
       const loadedIds = new Set(rules.map((r) => r.def_id));
@@ -124,10 +135,9 @@ export class RuleLoaderService {
   }
 
   // ----------------------------------------------------------------
-  // ตรวจสอบว่า table มี rule directory หรือไม่
+  // Check whether a rule directory exists for a table
   // ----------------------------------------------------------------
-  hasRuleDirectory(tableName: string): boolean {
-    return fs.existsSync(path.join(this.rulesDir, 'tables', tableName));
+  hasRuleDirectory(tableName: string, rulePath?: string): boolean {
+    return fs.existsSync(this.resolveTableDir(tableName, rulePath));
   }
-
 }

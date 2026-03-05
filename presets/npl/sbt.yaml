@@ -1,6 +1,9 @@
 name: SBT
-module: NPL
-description: Specific Business Tax related tables
-tables:
-  - table_name: PLACEHOLDER_NPL_SBT_TABLE_1
-  - table_name: PLACEHOLDER_NPL_SBT_TABLE_2
+module: npl
+description: "PLACEHOLDER — fill table names once mapping is confirmed."
+
+cases:
+  - name: placeholder
+    rule_path: PLACEHOLDER_npl_sbt
+    tables:
+      - PLACEHOLDER_TABLE_1

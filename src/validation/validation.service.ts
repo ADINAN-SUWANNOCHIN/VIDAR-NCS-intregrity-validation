@@ -52,8 +52,10 @@ export class ValidationService {
 
       this.logger.log(`[Job:${jobId}] Processing table: ${tableName}`);
 
+      const rulePath = tableConfig.rule_path;
+
       // ---- ตรวจว่ามี rule directory ----
-      if (!this.ruleLoader.hasRuleDirectory(tableName)) {
+      if (!this.ruleLoader.hasRuleDirectory(tableName, rulePath)) {
         this.logger.warn(`[Job:${jobId}] No rule directory for ${tableName}, skipping`);
         results.push({
           tableName,
@@ -70,7 +72,7 @@ export class ValidationService {
       }
 
       // ---- โหลด common rule ----
-      const commonRule = this.ruleLoader.loadCommonRule(tableName);
+      const commonRule = this.ruleLoader.loadCommonRule(tableName, rulePath);
       if (!commonRule) {
         results.push({
           tableName,
@@ -87,7 +89,7 @@ export class ValidationService {
       }
 
       // ---- โหลด def rules ----
-      const defRules = this.ruleLoader.loadDefRules(tableName, tableConfig.def_list);
+      const defRules = this.ruleLoader.loadDefRules(tableName, tableConfig.def_list, rulePath);
 
       // ---- เลือก Strategy ----
       let errors: ValidationError[] = [];

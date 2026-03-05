@@ -21,6 +21,15 @@ class RunPresetDto {
   job_name?: string;
 
   @IsOptional()
+  @IsString()
+  case_name?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  sources?: string[];
+
+  @IsOptional()
   @IsArray()
   @IsString({ each: true })
   def_list?: string[];
@@ -36,15 +45,17 @@ export class ValidationController {
 
   /**
    * POST /validation/run
-   * Body: ValidationRequestDto
-   * Response: { jobId: string }
+   * Manual run — supply table names and optional rule_path directly.
    *
-   * ตัวอย่าง Postman body:
+   * Body:
    * {
-   *   "job_name": "Nightly_Val_01",
+   *   "job_name": "My_Test",
    *   "tables": [
-   *     { "table_name": "conv$vinplhistory", "def_list": ["def01", "def02"] },
-   *     { "table_name": "conv$vinpahistory" }
+   *     {
+   *       "table_name": "conv$vinpahistory",
+   *       "rule_path": "rights_npa/lahistloantransactionhistory",
+   *       "def_list": ["def001"]
+   *     }
    *   ]
    * }
    */
@@ -60,7 +71,6 @@ export class ValidationController {
 
   /**
    * GET /validation/status/:jobId
-   * Response: JobRecord (status, progress, etc.)
    */
   @Get('status/:jobId')
   async getStatus(@Param('jobId') jobId: string): Promise<JobRecord> {
@@ -71,7 +81,6 @@ export class ValidationController {
 
   /**
    * GET /validation/report/:jobId
-   * คืน list ของ report file paths ที่สามารถ download ได้
    */
   @Get('report/:jobId')
   async getReport(
@@ -92,31 +101,47 @@ export class ValidationController {
 
   /**
    * GET /validation/presets
-   * Returns all available preset modules and their categories.
+   * Returns all available presets with their cases and source tables.
+   * Use this to discover valid values for case_name and sources filters.
    *
    * Example response:
-   * { "npl": ["eir", "tax", "sbt", "cit"], "npa": ["eir", "tax", "sbt", "cit"] }
+   * {
+   *   "npa": {
+   *     "rights": {
+   *       "cases": [
+   *         { "name": "lahistloantransactionhistory", "tables": ["conv$vinpahistory"] },
+   *         { "name": "lahisthloantransactionhistoryh", "tables": ["conv$vinpahistory", "conv$vinpainvcithistoryh", ...] }
+   *       ]
+   *     }
+   *   }
+   * }
    */
   @Get('presets')
-  getPresets(): Record<string, string[]> {
+  getPresets() {
     return this.presetService.listPresets();
   }
 
   /**
    * POST /validation/run/preset/:module/:category
-   * Fires a validation job using a stored preset configuration.
-   * No need to type table names — they are loaded from presets/{module}/{category}.yaml
+   * Run all or a filtered subset of tables from a preset.
    *
-   * Default: runs all tables in the preset with NO def rules.
-   * Optional body:
+   * Optional body filters:
    * {
-   *   "job_name": "My_Run",          (optional label)
-   *   "def_list": ["def01", "def02"] (optional — applies to ALL tables in preset)
+   *   "job_name":  "My_Run",                     — label for this job
+   *   "case_name": "lahisthloantransactionhistoryh", — run only this case (omit = all cases)
+   *   "sources":   ["conv$vinpainvcithistoryh"],  — run only these source tables (omit = all)
+   *   "def_list":  ["def001"]                    — apply def rules to all selected tables
    * }
    *
    * Examples:
-   *   POST /validation/run/preset/npl/eir             → no defs
-   *   POST /validation/run/preset/npl/eir  { "def_list": ["def01"] } → with def01
+   *   POST /validation/run/preset/npa/rights
+   *     → runs ALL cases, ALL source tables
+   *
+   *   POST /validation/run/preset/npa/rights  { "case_name": "lahisthloantransactionhistoryh" }
+   *     → runs all 5 source tables for Case 2 only
+   *
+   *   POST /validation/run/preset/npa/rights  { "case_name": "lahisthloantransactionhistoryh", "sources": ["conv$vinpainvcithistoryh"] }
+   *     → runs only the CIT source table for Case 2
    */
   @Post('run/preset/:module/:category')
   @HttpCode(HttpStatus.ACCEPTED)
@@ -124,26 +149,40 @@ export class ValidationController {
     @Param('module') module: string,
     @Param('category') category: string,
     @Body() body: RunPresetDto,
-  ): Promise<{ jobId: string; message: string }> {
-    const preset = this.presetService.loadPreset(module, category);
-    if (!preset) {
+  ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
+    const entries = this.presetService.resolveTablesForRun(
+      module,
+      category,
+      body.case_name,
+      body.sources,
+    );
+
+    if (entries.length === 0) {
       throw new NotFoundException(
-        `Preset [${module}/${category}] not found. Use GET /validation/presets to see available options.`,
+        `No tables matched for [${module}/${category}]` +
+          (body.case_name ? ` case="${body.case_name}"` : '') +
+          (body.sources ? ` sources=${JSON.stringify(body.sources)}` : '') +
+          `. Use GET /validation/presets to see available options.`,
       );
     }
 
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? `${module.toUpperCase()}_${category.toUpperCase()}`,
-      tables: preset.tables.map((t) => ({
-        table_name: t.table_name,
-        def_list: body.def_list ?? [],  // default: no defs
+      tables: entries.map((e) => ({
+        table_name: e.table_name,
+        rule_path: e.rule_path,
+        def_list: body.def_list ?? [],
       })),
     };
 
     const jobId = await this.validationService.startJob(dto);
+    const tableNames = entries.map((e) => e.table_name);
+
     return {
       jobId,
-      message: `Preset [${module}/${category}] started with ${preset.tables.length} table(s). Use GET /validation/status/${jobId} to check progress.`,
+      queued: entries.length,
+      tables: tableNames,
+      message: `Queued ${entries.length} table(s). Use GET /validation/status/${jobId} to track progress.`,
     };
   }
 }

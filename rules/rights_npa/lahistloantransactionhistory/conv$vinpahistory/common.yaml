@@ -119,8 +119,7 @@ schema_mappings:
     - old: ratevariancecode
       new: variancecode               # column renamed
 
-    # NOTE: billno excluded — old="200811" vs new="20081121150000434"
-    #   (new concatenates billno + accountno; needs custom transform — defer)
+    # NOTE: billno excluded from exact_matches — handled via concat_matches below
     # NOTE: planno not in conv$vinpalrentalhistory — safe (only checked in vinpahistory pair)
 
     # ---- Ensure conv$vinpalrentalhistory and conv$vinpalrtrespasserhist are in pairMap ----
@@ -254,3 +253,11 @@ schema_mappings:
     # NOTE: startinterestdate, endinterestdate — excluded: old="" nvarchar vs new=null datetime2
     # NOTE: noofdays — excluded: old="" nvarchar vs new=null int (empty-vs-null edge case)
     # NOTE: interestrate — excluded: old="" empty vs new=0 decimal (empty-as-zero edge case)
+
+  # ---- Concat mappings ----
+  # billno: old="200811" → new="20081121150000434" (billno + newaccountno concatenated, no separator)
+  # Engine in group-mode: collects distinct (billno+newaccountno) per old row, compares to distinct new.billno values.
+  concat_matches:
+    - old_cols: [billno, newaccountno]
+      new: billno
+      separator: ""

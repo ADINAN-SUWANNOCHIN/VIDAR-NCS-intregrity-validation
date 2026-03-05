@@ -1,7 +1,9 @@
 name: EIR
-module: NPL
-description: Effective Interest Rate related tables
-tables:
-  - table_name: PLACEHOLDER_NPL_EIR_TABLE_1
-  - table_name: PLACEHOLDER_NPL_EIR_TABLE_2
-  - table_name: PLACEHOLDER_NPL_EIR_TABLE_3
+module: npl
+description: "PLACEHOLDER — fill table names once mapping is confirmed."
+
+cases:
+  - name: placeholder
+    rule_path: PLACEHOLDER_npl_eir
+    tables:
+      - PLACEHOLDER_TABLE_1

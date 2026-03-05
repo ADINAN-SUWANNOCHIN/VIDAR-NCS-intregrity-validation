@@ -7,6 +7,10 @@ export class TableConfig {
   table_name: string;
 
   @IsOptional()
+  @IsString()
+  rule_path?: string;
+
+  @IsOptional()
   @IsArray()
   @IsString({ each: true })
   def_list?: string[];

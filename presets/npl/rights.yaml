@@ -1,0 +1,12 @@
+name: Rights NPL
+module: npl
+description: "NPL rights tables (ln$ prefix)."
+
+cases:
+  # ---------------------------------------------------------------
+  # conv$vinplhistory → ln$lnhistloantransactionhistory (TRANSACTION)
+  # ---------------------------------------------------------------
+  - name: lnhistloantransactionhistory
+    rule_path: rights_npl/lnhistloantransactionhistory
+    tables:
+      - "conv$vinplhistory"

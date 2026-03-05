@@ -1,6 +1,9 @@
 name: CIT
-module: NPA
-description: Corporate Income Tax related tables
-tables:
-  - table_name: PLACEHOLDER_NPA_CIT_TABLE_1
-  - table_name: PLACEHOLDER_NPA_CIT_TABLE_2
+module: npa
+description: "PLACEHOLDER — fill table names once mapping is confirmed."
+
+cases:
+  - name: placeholder
+    rule_path: PLACEHOLDER_npa_cit
+    tables:
+      - PLACEHOLDER_TABLE_1
