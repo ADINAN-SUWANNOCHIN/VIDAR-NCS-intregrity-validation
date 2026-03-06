@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Controller, Get, Module, Redirect } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { DatabaseService } from './database/database.service';
 import { RuleLoaderService } from './rules/rule-loader.service';
@@ -12,6 +12,21 @@ import { PresetService } from './validation/preset.service';
 import { SchemaController } from './schema/schema.controller';
 import { SchemaService } from './schema/schema.service';
 
+/** Handles root-level routes that must NOT be prefixed by any controller path. */
+@Controller()
+class HealthController {
+  /** GET /health — Kubernetes liveness + readiness probe target. */
+  @Get('health')
+  health(): { status: string } {
+    return { status: 'ok' };
+  }
+
+  /** GET / — redirect to Swagger UI. */
+  @Get()
+  @Redirect('/api', 302)
+  root() {}
+}
+
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -19,7 +34,7 @@ import { SchemaService } from './schema/schema.service';
       envFilePath: '.env',
     }),
   ],
-  controllers: [ValidationController, SchemaController],
+  controllers: [HealthController, ValidationController, SchemaController],
   providers: [
     DatabaseService,
     RuleLoaderService,
