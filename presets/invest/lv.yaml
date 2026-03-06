@@ -1,0 +1,30 @@
+name: Invest LV
+module: invest
+description: "LV investment tables (lv$ prefix). conv$vinpllvcithistory → lv$lvhisthinvtransactionhistoryh (1:1) and conv$vinpllvhistory → lv$lvhisthsum (partial — vinpllvhistory contribution only, other sources also feed into lv$lvhisthsum)."
+
+cases:
+  # ---------------------------------------------------------------
+  # Case 1: TRANSACTION ~1:1
+  # conv$vinpllvcithistory → lv$lvhisthinvtransactionhistoryh
+  # Row count: 6,613,118 old ≈ 6,611,057 new (2,061 gap = rows
+  # routed to lv$lvhisth_fbo_truesale — expected ROW_MISSING).
+  # Group key: systemreferenceno (CE6xxx / RQ-xxx format).
+  # ---------------------------------------------------------------
+  - name: lvhisthinvtransactionhistoryh
+    rule_path: invest_lv/lvhisthinvtransactionhistoryh
+    tables:
+      - "[ncs-conv-aging].dbo.[conv$vinpllvcithistory]"
+
+  # ---------------------------------------------------------------
+  # Case 2: TRANSACTION (partial source)
+  # conv$vinpllvhistory → lv$lvhisthsum
+  # lv$lvhisthsum has 11.7M rows total but receives data from
+  # multiple sources. This rule validates only the vinpllvhistory
+  # contribution (P-prefix sysrefs, ~24.5% of new table rows).
+  # ROW_MISSING from other sources (CE/RQ/IR/TD/etc.) is expected.
+  # Group key: systemreferenceno (P6xxx / ADC-xxx format).
+  # ---------------------------------------------------------------
+  - name: lvhisthsum
+    rule_path: invest_lv/lvhisthsum
+    tables:
+      - "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"

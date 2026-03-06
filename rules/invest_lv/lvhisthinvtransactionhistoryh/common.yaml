@@ -1,0 +1,154 @@
+# ============================================================
+# invest_lv / Case 1: TRANSACTION
+# conv$vinpllvcithistory → lv$lvhisthinvtransactionhistoryh
+#
+# Row cardinality: ~6.6M old rows ≈ 6.6M new rows (confirmed by row count cross-check).
+# Row count gap of 2,061 = rows routed to lv$lvhisth_fbo_truesale (different product type).
+# Group key: systemreferenceno (CE6xxx / RQ-xxx format, repeats per account across months)
+#
+# ANCHOR KEY NOTE:
+#   IDs are NOT preserved through migration (old id ≠ new id).
+#   TransactionStrategy fetches new rows by tg.keys.new (group key).
+#   anchor_key.old = id (unique+monotonic auto-increment, keyset pagination cursor only).
+#   anchor_key.new = id (required schema field, unused for fetching in group mode).
+#
+# Columns confirmed NULL in new table (not migrated from CIT source):
+#   orgsystemreferencenumber, debitcredit, affectcode, transactonseq,
+#   accountbranch, servicebranch, investtaxosb4, profittaxosb4, createdate,
+#   severity, newaccountno
+#
+# Excluded from mapping:
+#   adjprincipleamount, adjinterestamount, adjotherchargeamount — adjustment versions
+#     map to same new columns as principal versions; use primary columns only.
+#   accounttype, newinvaccountno — duplicate targets (both → lvaccountno/lvaccounttype).
+#   gainamount, adjgainamount — MANUAL_CHECK → transactionamount; ambiguous, skip.
+#   gainbalanceb4t — PROBABLE → currentbalanceb4t, but currentbalanceb4t already VERIFIED.
+#   gaininvestbalance, gaininvesttaxbalance, differencegainbalance — running/computed balances.
+#   nplaccrureinterest — computed accrual interest, no direct mapping confirmed.
+#   txformatbalancecloseaccount — schema matcher mapped → txformatinterestamount (mismatch by name).
+#   accountno — maps to lnaccountno (loan account system, different from CIT account system).
+#   transactiontype — incorrectly matched → transactiondate by schema matcher.
+#   keydate — internal migration timestamp, not business data.
+#   line, content, success, successlv2 — conv metadata columns.
+#   investoutstandingbalance, differenceinvestbalance, deferredtax, runningno — NO_MATCH.
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinpllvcithistory]"
+  target: "[ncs-npl-aging].dbo.[lv$lvhisthinvtransactionhistoryh]"
+  table_type: TRANSACTION
+
+anchor_key:
+  old: id
+  new: id
+
+transaction_grouping:
+  keys:
+    old: systemreferenceno
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+    - old: invaccountno
+      new: lvaccountno
+
+    - old: invaccounttype
+      new: lvaccounttype
+
+    - old: auxilarytransactioncode
+      new: auxilarytranscode          # renamed (shortened)
+
+    - old: orderno
+      new: orderno
+
+    - old: tellerid
+      new: tellerid
+
+    - old: glgroupcode
+      new: glgroupcode
+
+    - old: costcenter
+      new: costcenter
+
+    - old: inputsourcesystem
+      new: inputsourcesystem
+
+    - old: reversalflag
+      new: reversal                   # renamed
+
+    - old: remark
+      new: remark
+
+    - old: sendtax
+      new: sendtax
+
+    - old: txdiffcostexpenseamount
+      new: txdiffcostexpenseamount
+
+    - old: txformatbalancewriteoff
+      new: txformatbalancewriteoff
+
+    - old: currency
+      new: currency
+
+    - old: doctype
+      new: doctype
+
+    - old: citratio
+      new: citratio
+
+    - old: orgjournalseqno
+      new: journalseqno               # renamed
+
+    - old: eventcode
+      new: gleventcode                # renamed
+
+    - old: otherchargeamountb4t
+      new: otherchargeamountb4t
+
+  transformed_matches:
+    # Amount columns: old = nvarchar, new = decimal
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+
+    - old: principleamount
+      new: lvdebitprincipleamount
+      transform_rule: NONE
+
+    - old: interestamount
+      new: lvdebitinterestamount
+      transform_rule: NONE
+
+    - old: otherchargeamount
+      new: lvcreditotherchargeamount
+      transform_rule: NONE
+
+    - old: paymentamount
+      new: paymentamount
+      transform_rule: NONE
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+
+    - old: investtaxoutstandingbalance
+      new: b4txtaxcostbalance
+      transform_rule: NONE            # renamed — investment tax outstanding
+
+    # Date columns: old = ISO string "2024-01-01T00:00:00.000+07:00", new = datetime2
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME

@@ -1,0 +1,150 @@
+# ============================================================
+# invest_lv / Case 2: TRANSACTION
+# conv$vinpllvhistory → lv$lvhisthsum
+#
+# Row cardinality: 18M old rows vs 11.7M new rows.
+# lv$lvhisthsum is a UNION of multiple sources (P-prefix from vinpllvhistory accounts
+# for ~24.5%, CE/RQ from vinpllvcithistory for ~57%, and other sources ~18%).
+# This rule validates ONLY the vinpllvhistory contribution (P-prefix sysrefs).
+# Row count mismatch is expected — other sources inflate the new table row count.
+#
+# Group key: systemreferenceno (P6xxx / ADC-xxx format, unique per transaction group)
+#
+# ANCHOR KEY NOTE:
+#   IDs are NOT preserved through migration (old id ≠ new id).
+#   TransactionStrategy fetches new rows by tg.keys.new (group key).
+#   anchor_key.old = id (unique+monotonic auto-increment, keyset pagination cursor only).
+#   anchor_key.new = id (required schema field, unused for fetching in group mode).
+#
+# Excluded from mapping:
+#   id — REGENERATED_ID, not preserved.
+#   newaccountno — NULL in many rows; accountno already maps to lvaccountno.
+#   ceirrate — PROBABLE → irrrate, but irrrate already directly mapped; skip to avoid conflict.
+#   _effectivedate, _transactiondate, _keydate — migration-internal temp columns (prefixed _).
+#   penaltyamountb4t — not confirmed in new table schema for this source.
+#   createdate, severity — NULL_COL (not migrated).
+#   conversionstatus — migration operational flag.
+#   line, content, success, successlv2 — conv metadata columns.
+#   loantranshostcode — schema matched → lvformatgainsettlement (name mismatch; unclear mapping).
+#   docnoexpense — MANUAL_CHECK → b4txotherexpense; awaiting business confirmation.
+#   runningno — MANUAL_CHECK → runningtxtaxcostbalance; awaiting business confirmation.
+#   keydate — internal migration timestamp.
+#   tempid — migration-generated temp ID (TEMP-XXXXXXXXXX format).
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
+  target: "[ncs-npl-aging].dbo.[lv$lvhisthsum]"
+  table_type: TRANSACTION
+
+anchor_key:
+  old: id
+  new: id
+
+transaction_grouping:
+  keys:
+    old: systemreferenceno
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+    - old: accountno
+      new: lvaccountno
+
+    - old: affectcode
+      new: affectcode
+
+    - old: chargetype
+      new: chargetype
+
+    - old: tellerid
+      new: tellerid
+
+    - old: inputsourcesystem
+      new: inputsourcesystem
+
+    - old: orgsystemreferencenumber
+      new: orgsystemreferencenumber
+
+    - old: doctype
+      new: doctype
+
+    - old: auxilarytransaction
+      new: auxilarytranscode          # renamed (shortened)
+
+    - old: debitcredit
+      new: debitcredit___             # renamed with suffix in new system
+
+    - old: noofdays
+      new: noofdays
+
+    - old: remark
+      new: remark
+
+  transformed_matches:
+    # Amount columns: old = nvarchar, new = decimal
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+
+    - old: paymentamount
+      new: paymentamount
+      transform_rule: NONE
+
+    - old: gaincashbalanceb4t
+      new: gaincashbalanceb4t
+      transform_rule: NONE
+
+    - old: gainsettlementbalanceb4t
+      new: gainsettlementbalanceb4t
+      transform_rule: NONE
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+
+    - old: interestb4t
+      new: interestb4t
+      transform_rule: NONE
+
+    - old: calprovisionamount
+      new: calprovisionamount
+      transform_rule: NONE
+
+    # Rate columns: old = ".0235" (leading dot, nvarchar), new = decimal
+    - old: yieldrate
+      new: yieldrate
+      transform_rule: STRIP_LEADING_ZEROS
+
+    - old: irrrate
+      new: irrrate
+      transform_rule: STRIP_LEADING_ZEROS
+
+    - old: calculateintrate
+      new: calculateintrate
+      transform_rule: STRIP_LEADING_ZEROS
+
+    # Date columns: old = ISO string "2024-01-01T00:00:00.000+07:00", new = datetime2
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: startinterestdate
+      new: startinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: endinterestdate
+      new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
