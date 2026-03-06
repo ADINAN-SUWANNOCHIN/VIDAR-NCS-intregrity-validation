@@ -98,9 +98,10 @@ export abstract class BaseStrategy {
       concat_matches: (sm.concat_matches ?? []).filter(
         (m) => !m.old_cols.some((c) => missingOld.has(c)) && !missingNew.has(m.new),
       ),
+      formula_matches: (sm.formula_matches ?? []).filter(
+        (m) => !m.old_cols.some((c) => missingOld.has(c)) && !missingNew.has(m.new),
+      ),
       // L3: filter pivot_matches the same way as other mapping types.
-      // Previously passed through unfiltered, so a missing pivot column would cause
-      // wrong comparisons or silent undefined-value mismatches in HEADER strategy.
       pivot_matches: (sm.pivot_matches ?? []).filter(
         (m) => !missingOld.has(m.value_col) && !missingNew.has(m.new_col),
       ),
@@ -143,7 +144,10 @@ export abstract class BaseStrategy {
     let sample: Record<string, unknown>[];
     try {
       sample = await this.db.sampleRows(table, 1000);
-    } catch {
+    } catch (e: unknown) {
+      this.logger.warn(
+        `[noisy-col] sampleRows failed for [${table}] — all columns treated as NORMAL. Cause: ${(e as Error)?.message ?? String(e)}`,
+      );
       columns.forEach((c) => result.set(c, 'NORMAL'));
       return result;
     }
@@ -202,6 +206,68 @@ export abstract class BaseStrategy {
     }
 
     return matches;
+  }
+
+  /**
+   * Reports DB columns that exist in either table but are not covered by any mapping.
+   * Pushes one DATA_MISSING error per table that has unmapped columns.
+   * Does NOT attempt auto-matching — reporting only.
+   */
+  protected async reportUnmappedColumns(
+    source: string,
+    target: string,
+    sm: SchemaMappings,
+    tag: string,
+  ): Promise<ValidationError[]> {
+    const errors: ValidationError[] = [];
+
+    const mappedOld = new Set<string>([
+      ...(sm.exact_matches ?? []).map((m) => m.old),
+      ...(sm.split_matches ?? []).map((m) => m.old),
+      ...(sm.transformed_matches ?? []).map((m) => m.old),
+      ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.formula_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.pivot_matches ?? []).map((m) => m.value_col),
+    ]);
+
+    const mappedNew = new Set<string>([
+      ...(sm.exact_matches ?? []).map((m) => m.new),
+      ...(sm.split_matches ?? []).flatMap((m) => m.new_cols),
+      ...(sm.transformed_matches ?? []).map((m) => m.new),
+      ...(sm.concat_matches ?? []).map((m) => m.new),
+      ...(sm.formula_matches ?? []).map((m) => m.new),
+      ...(sm.pivot_matches ?? []).map((m) => m.new_col),
+    ]);
+
+    const [allOld, allNew] = await Promise.all([
+      this.getColumnNames(source),
+      this.getColumnNames(target),
+    ]);
+
+    const unmappedOld = allOld.filter((c) => !mappedOld.has(c));
+    const unmappedNew = allNew.filter((c) => !mappedNew.has(c));
+
+    if (unmappedOld.length > 0) {
+      this.logger.warn(
+        `[${tag}] ${unmappedOld.length} source column(s) in [${source}] not covered by any mapping: ${unmappedOld.join(', ')}`,
+      );
+      errors.push({
+        errorType: 'DATA_MISSING',
+        message: `[${tag}] Source [${source}] has ${unmappedOld.length} unmapped column(s): ${unmappedOld.join(', ')}`,
+      });
+    }
+
+    if (unmappedNew.length > 0) {
+      this.logger.warn(
+        `[${tag}] ${unmappedNew.length} target column(s) in [${target}] not covered by any mapping: ${unmappedNew.join(', ')}`,
+      );
+      errors.push({
+        errorType: 'DATA_MISSING',
+        message: `[${tag}] Target [${target}] has ${unmappedNew.length} unmapped column(s): ${unmappedNew.join(', ')}`,
+      });
+    }
+
+    return errors;
   }
 
   // ----------------------------------------------------------------

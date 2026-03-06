@@ -28,9 +28,6 @@ actions:
       new_col: tellerid
       old_col: tellerid
       skip_if_old_equals: CONV
-      fail_if_new_matches: "^\\d+$|^\\*|^CONV$"
+      fail_if_new_matches: "^\\d+$|^\\*|^CONV$|^PLAN"
     condition: valid
-    error_message: >
-      Teller ID conversion issue: new table contains rows with tellerid='CONV'
-      that do not correspond to old CONV conversion records.
-      Expected: real teller IDs in new system. Check ETL teller ID mapping logic.
+    error_message: "Teller ID not converted — expected AD username (e.g. surasak.s), got unconverted code"

@@ -166,13 +166,28 @@ export class ValidationService {
     // L2: affectcode column name variants — DB stores short codes like "A1", "PP", "BC".
     // Primary attempt is 'affectcode'; outer try/catch logs a warning if column name differs.
     // Confirmed from affect_codes.json: codes are 2-char uppercase strings (A1, BC, PP, ...).
+    // Try each known variant for the affect code column name.
+    // querySumByGroup throws if the column doesn't exist; we try the next variant silently.
     const AFFECT_CODE_VARIANTS = ['affectcode', 'affect_code', 'afcode', 'affcode', 'affect_cd'];
-    const affectCol = { old: AFFECT_CODE_VARIANTS[0], new: AFFECT_CODE_VARIANTS[0] };
 
     try {
       // C9: For UNION tables (multiple sources), aggregate SUM across ALL sources per affectcode.
       // Previous code used only sources[0], silently ignoring discrepancies in sources[1..n].
       const allSources = source.split(',').map((s) => s.trim());
+
+      // Detect which affect code column name this table uses by trying each variant
+      let affectColName = AFFECT_CODE_VARIANTS[0];
+      for (const variant of AFFECT_CODE_VARIANTS) {
+        try {
+          await this.db.querySumByGroup(allSources[0], amountMapping.old, variant);
+          affectColName = variant;
+          break;
+        } catch {
+          // column doesn't exist — try next variant
+        }
+      }
+      const affectCol = { old: affectColName, new: affectColName };
+
       const oldSumsAgg = new Map<string, number>();
       for (const src of allSources) {
         const srcSums = await this.db.querySumByGroup(src, amountMapping.old, affectCol.old);
@@ -187,8 +202,8 @@ export class ValidationService {
         if (Math.abs(oldTotal - newTotal) > tolerance) {
           errors.push({
             errorType: 'VALUE_MISMATCH',
-            oldColumn: `SUM(transactionamount) WHERE affectcode='${code}'`,
-            newColumn: `SUM(transactionamount) WHERE affectcode='${code}'`,
+            oldColumn: `SUM(${amountMapping.old}) WHERE affectcode='${code}'`,
+            newColumn: `SUM(${amountMapping.new}) WHERE affectcode='${code}'`,
             oldValue: oldTotal,
             newValue: newTotal,
             message: `[AGGREGATE] SUM mismatch for affectcode=${code}: old=${oldTotal.toFixed(2)}, new=${newTotal.toFixed(2)}, diff=${Math.abs(oldTotal - newTotal).toFixed(2)}`,

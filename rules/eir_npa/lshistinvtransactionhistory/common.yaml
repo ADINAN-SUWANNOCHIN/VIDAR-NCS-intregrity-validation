@@ -1,0 +1,137 @@
+# ============================================================
+# Case 1: TRANSACTION 1:1
+# conv$vinpainvesthist → ls$lshistinvtransactionhistory
+#
+# Row cardinality: N old rows per group = N new rows per group (verified on sample).
+# Group key: systemreferencenumber → systemreferenceno
+#
+# ANCHOR KEY NOTE:
+#   IDs are NOT preserved through migration (old id ≠ new id).
+#   TransactionStrategy now fetches new rows by tg.keys.new (group key), not anchor_key.new.
+#   anchor_key is a keyset pagination cursor only — it must be unique+monotonic per row.
+#   For this table (1:1 per group), systemreferencenumber is unique per row → safe as anchor.
+#   Ideally use id as anchor_key if available; current setup is functionally correct.
+#
+# Excluded from old (not in new regular table):
+#   lsformatdiffincome, lsformatbfaccint, laformatt9adjustpp, laformatbfaccint,
+#   lsformattdrdiffincome, laformatggpayment, laformatsumintpayment, laformatcreditpp,
+#   lsformatmodifygainloss, laformatbfggpayment — these go to the H table only.
+#   accountno — old system account number, not migrated.
+#   line, content, success, successlv2, conversionstatus, severity — conv metadata.
+#   keydate, _keydate, _effectivedate, _transactiondate — conv internal timestamps.
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinpainvesthist]"
+  target: "[ncs-npl-aging].dbo.[ls$lshistinvtransactionhistory]"
+  table_type: TRANSACTION
+
+# Using group key as anchor — see ANCHOR KEY NOTE above.
+anchor_key:
+  old: systemreferencenumber
+  new: systemreferenceno
+
+transaction_grouping:
+  keys:
+    old: systemreferencenumber
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+    - old: newaccountno
+      new: lsaccountno
+
+    - old: loantransaction
+      new: loantranshostcode           # renamed
+
+    - old: systemreferencenumber
+      new: systemreferenceno           # group key, also mapped as orderno below
+
+    - old: systemreferencenumber
+      new: orderno                     # same value, different column name in new
+
+    - old: debitcredit
+      new: debitcredit
+
+    - old: affectcode
+      new: affectcode
+
+    - old: chargetype
+      new: chargetype
+
+    - old: tellerid
+      new: tellerid
+
+    - old: servicebranch
+      new: servicebranch
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+
+    - old: interestb4t
+      new: interestb4t
+
+    - old: orgsystemreferencenumber
+      new: orgsystemreferencenumber
+
+    - old: doctype
+      new: doctype
+
+    - old: inputsourcesystem
+      new: inputsourcesystem
+
+    - old: remark
+      new: remark
+
+    - old: auxilarytransactioncode
+      new: auxilarytranscode           # renamed (shortened)
+
+    - old: noofdays
+      new: noofdays
+
+    # NOTE: stage → t9stage possible rename (both nullable in sample — skip if mismatch)
+    - old: stage
+      new: t9stage
+
+  transformed_matches:
+    # Amount columns: old = nvarchar in source, new = decimal
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+
+    - old: eirrate
+      new: eirrate
+      transform_rule: NONE
+
+    - old: calculateintrate
+      new: calculateintrate
+      transform_rule: NONE
+
+    - old: calprovisionamount
+      new: calprovisionamount
+      transform_rule: NONE
+
+    # Date columns: old = ISO string "2024-01-01T00:00:00.000+07:00", new = datetime2
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: startinterestdate
+      new: startinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: endinterestdate
+      new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
