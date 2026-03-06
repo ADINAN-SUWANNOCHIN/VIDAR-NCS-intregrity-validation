@@ -222,6 +222,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     anchorColumn: string,
     chunkSize: number,
     lastKey: unknown,
+    extraFilter?: string,
   ): Promise<Record<string, unknown>[]> {
     const request = this.pool.request();
     request.stream = true;
@@ -231,13 +232,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         ? `WHERE [${anchorColumn}] IS NOT NULL`
         : `WHERE [${anchorColumn}] > @lastKey`;
 
+    const filterClause = extraFilter ? `AND (${extraFilter})` : '';
+
     if (lastKey !== null) {
       this.bindLastKey(request, lastKey);
     }
 
     request.query(`
       SELECT * FROM ${tableRef(table)} WITH (NOLOCK)
-      ${whereClause}
+      ${whereClause} ${filterClause}
       ORDER BY [${anchorColumn}]
       OFFSET 0 ROWS FETCH NEXT ${chunkSize} ROWS ONLY
     `);

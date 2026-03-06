@@ -1,14 +1,13 @@
 name: Invest LV
 module: invest
-description: "LV investment tables (lv$ prefix). conv$vinpllvcithistory → lv$lvhisthinvtransactionhistoryh (1:1) and conv$vinpllvhistory → lv$lvhisthsum (partial — vinpllvhistory contribution only, other sources also feed into lv$lvhisthsum)."
+description: "LV investment tables (lv$ prefix). conv$vinpllvcithistory is routed to 4 new tables by invaccounttype (TX=6.6M→invtransactionhistoryh, TF=1159→fbo, TS=902→truesale, TF+TS=2061→fbo_truesale). conv$vinpllvhistory → lv$lvhisthsum (partial, P-prefix sysrefs only)."
 
 cases:
   # ---------------------------------------------------------------
-  # Case 1: TRANSACTION ~1:1
+  # Case 1: TRANSACTION ~1:1 (invaccounttype = TX)
   # conv$vinpllvcithistory → lv$lvhisthinvtransactionhistoryh
-  # Row count: 6,613,118 old ≈ 6,611,057 new (2,061 gap = rows
-  # routed to lv$lvhisth_fbo_truesale — expected ROW_MISSING).
-  # Group key: systemreferenceno (CE6xxx / RQ-xxx format).
+  # Row count: 6,611,057 (TX rows only; TF/TS rows go to fbo/truesale)
+  # Group key: systemreferenceno
   # ---------------------------------------------------------------
   - name: lvhisthinvtransactionhistoryh
     rule_path: invest_lv/lvhisthinvtransactionhistoryh
@@ -16,15 +15,43 @@ cases:
       - "[ncs-conv-aging].dbo.[conv$vinpllvcithistory]"
 
   # ---------------------------------------------------------------
-  # Case 2: TRANSACTION (partial source)
+  # Case 2: TRANSACTION (partial source, P-prefix sysrefs)
   # conv$vinpllvhistory → lv$lvhisthsum
-  # lv$lvhisthsum has 11.7M rows total but receives data from
-  # multiple sources. This rule validates only the vinpllvhistory
-  # contribution (P-prefix sysrefs, ~24.5% of new table rows).
-  # ROW_MISSING from other sources (CE/RQ/IR/TD/etc.) is expected.
+  # lv$lvhisthsum is a UNION of multiple sources. This rule validates
+  # only the vinpllvhistory contribution (~24.5% of new table rows).
   # Group key: systemreferenceno (P6xxx / ADC-xxx format).
   # ---------------------------------------------------------------
   - name: lvhisthsum
     rule_path: invest_lv/lvhisthsum
     tables:
       - "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
+
+  # ---------------------------------------------------------------
+  # Case 3: TRANSACTION (invaccounttype = TF — FBO accounts)
+  # conv$vinpllvcithistory → lv$lvhisth_fbo
+  # Row count: 1,159 (exact 1:1)
+  # ---------------------------------------------------------------
+  - name: lvhisth_fbo
+    rule_path: invest_lv/lvhisth_fbo
+    tables:
+      - "[ncs-conv-aging].dbo.[conv$vinpllvcithistory]"
+
+  # ---------------------------------------------------------------
+  # Case 4: TRANSACTION (invaccounttype = TS — TrueSale accounts)
+  # conv$vinpllvcithistory → lv$lvhisth_truesale
+  # Row count: 902 (exact 1:1)
+  # ---------------------------------------------------------------
+  - name: lvhisth_truesale
+    rule_path: invest_lv/lvhisth_truesale
+    tables:
+      - "[ncs-conv-aging].dbo.[conv$vinpllvcithistory]"
+
+  # ---------------------------------------------------------------
+  # Case 5: TRANSACTION (invaccounttype IN ('TF','TS') — combined)
+  # conv$vinpllvcithistory → lv$lvhisth_fbo_truesale
+  # Row count: 2,061 (1,159 TF + 902 TS, exact 1:1)
+  # ---------------------------------------------------------------
+  - name: lvhisth_fbo_truesale
+    rule_path: invest_lv/lvhisth_fbo_truesale
+    tables:
+      - "[ncs-conv-aging].dbo.[conv$vinpllvcithistory]"
