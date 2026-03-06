@@ -81,7 +81,7 @@ schema_mappings:
       new: citratio
 
     - old: orgjournalseqno
-      new: journalseqno
+      new: originaljournalseqno       # journalseqno in new = systemreferenceno, not this col
 
     - old: eventcode
       new: gleventcode
@@ -116,6 +116,10 @@ schema_mappings:
 
     - old: investtaxoutstandingbalance
       new: b4txtaxcostbalance
+      transform_rule: NONE
+
+    - old: mischargeamountb4t
+      new: miscchargeamountb4t
       transform_rule: NONE
 
     - old: transactiondate

@@ -102,7 +102,7 @@ schema_mappings:
       new: citratio
 
     - old: orgjournalseqno
-      new: journalseqno               # renamed
+      new: originaljournalseqno       # renamed (journalseqno in new = systemreferenceno, not this col)
 
     - old: eventcode
       new: gleventcode                # renamed
@@ -139,6 +139,10 @@ schema_mappings:
     - old: investtaxoutstandingbalance
       new: b4txtaxcostbalance
       transform_rule: NONE            # renamed — investment tax outstanding
+
+    - old: mischargeamountb4t
+      new: miscchargeamountb4t        # renamed (extra c added in new system)
+      transform_rule: NONE
 
     # Date columns: old = ISO string "2024-01-01T00:00:00.000+07:00", new = datetime2
     - old: transactiondate
