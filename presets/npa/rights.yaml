@@ -17,15 +17,27 @@ cases:
       - "conv$vinpahistory"
 
   # ---------------------------------------------------------------
-  # Case 2: 5 sources → la$lahisthloantransactionhistoryh
-  # Each source is validated independently (TRANSACTION type, group SUM).
-  # Groups overlap across sources so separate YAMLs are required.
+  # Case 2: MULTIPLE 5:1
+  # conv$vinpahistory + conv$vinpainvcithistoryh + conv$vinpalnsbthistory
+  #   + conv$vinpalrentalhistory + conv$vinpalrtrespasserhist
+  #   → la$lahisthloantransactionhistoryh
+  # All 5 sources are declared inside conv$vinpahistory/common.yaml
+  # (table_info.source comma-separated). Only the primary table is listed here.
   # ---------------------------------------------------------------
   - name: lahisthloantransactionhistoryh
     rule_path: rights_npa/lahisthloantransactionhistoryh
     tables:
       - "conv$vinpahistory"
-      - "conv$vinpainvcithistoryh"
-      - "conv$vinpalnsbthistory"
-      - "conv$vinpalrentalhistory"
-      - "conv$vinpalrtrespasserhist"
+
+  # ---------------------------------------------------------------
+  # Case 3: TRANSACTION cross-check (both NEW tables, no CONV source)
+  # la$lahisthloantransactionhistoryh ↔ la$lahistloantransactionhistory
+  # Validates shared columns (b4t balances, dates, account info) agree.
+  # bill* vs debit/credit formula validation is documented but not yet
+  # automated (no formula transform rule in engine).
+  # Source listed as the H table's anchor table for engine routing.
+  # ---------------------------------------------------------------
+  - name: lahistloantransactionhistory_crosscheck
+    rule_path: rights_npa/lahistloantransactionhistory_crosscheck
+    tables:
+      - "la$lahisthloantransactionhistoryh"

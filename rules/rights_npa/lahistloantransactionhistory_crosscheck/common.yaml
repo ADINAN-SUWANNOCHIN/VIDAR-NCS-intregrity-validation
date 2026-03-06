@@ -1,0 +1,262 @@
+# ============================================================
+# Cross-Check: la$lahistloantransactionhistory ↔ la$lahisthloantransactionhistoryh
+# Table type: TRANSACTION (group by systemreferenceno)
+#
+# Purpose: Verify that both derived-from-NPA tables agree on shared columns
+# (b4t balances, date fields, account info, etc.).
+#
+# NOTE on HEADER / formula columns:
+#   la$lahistloantransactionhistory has: billprinciple, billinterest, billdefered,
+#     billinterestb4rest, billmiscd, billothercharge, billpenalty
+#   la$lahisthloantransactionhistoryh has: debit/credit pairs for each amount type
+#   The formula is billX = creditXamount - debitXamount
+#   This CANNOT be validated by the current transform engine (no built-in formula rule).
+#   Add a def rule (ROW_LEVEL_COHESION) if formula validation is required.
+#
+# NOTE on row cardinality:
+#   Both tables are wide-format (one row per systemreferenceno).
+#   HEADER strategy requires long-format source (multiple rows per group, one per pivot_key).
+#   Neither table has that structure — TRANSACTION is the correct strategy here.
+# ============================================================
+
+table_info:
+  source: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+  target: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+  table_type: TRANSACTION
+
+# anchor_key: auto-increment id, unique per row — safe for keyset pagination
+anchor_key:
+  old: id
+  new: id
+
+# Group comparison by transaction reference number (same column name in both tables)
+transaction_grouping:
+  keys:
+    old: systemreferenceno
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+    # --- Account identity ---
+    - old: accountno
+      new: accountno
+
+    - old: accounttype
+      new: accounttype
+
+    - old: bank
+      new: bank
+
+    - old: branch
+      new: branch
+
+    - old: accountbranch
+      new: accountbranch
+
+    - old: servicebranch
+      new: servicebranch
+
+    # --- Transaction identity ---
+    - old: systemreferenceno
+      new: systemreferenceno
+
+    - old: auxilarytranscode
+      new: auxilarytranscode
+
+    - old: orderno
+      new: orderno
+
+    - old: journalseqno
+      new: journalseqno
+
+    - old: originaljournalseqno
+      new: originaljournalseqno
+
+    - old: channel
+      new: channel
+
+    - old: tellerid
+      new: tellerid
+
+    - old: receiptno
+      new: receiptno
+
+    - old: currency
+      new: currency
+
+    - old: transactonseq
+      new: transactonseq
+
+    - old: gleventcode
+      new: gleventcode
+
+    - old: glgroupcode
+      new: glgroupcode
+
+    - old: costcenter
+      new: costcenter
+
+    - old: reversal
+      new: reversal
+
+    - old: active
+      new: active
+
+    - old: remark
+      new: remark
+
+    - old: doctype
+      new: doctype
+
+    - old: tempid
+      new: tempid
+
+    - old: planno
+      new: planno
+
+    - old: affectnextpaymentflag
+      new: affectnextpaymentflag
+
+    - old: microflowname
+      new: microflowname
+
+    - old: programname
+      new: programname
+
+    - old: createby
+      new: createby
+
+    - old: updateby
+      new: updateby
+
+    # --- B4T (before-transaction) balance snapshot — should match exactly ---
+    - old: paymentamountb4t
+      new: paymentamountb4t
+
+    - old: partialamountb4t
+      new: partialamountb4t
+
+    - old: paymentcodeb4t
+      new: paymentcodeb4t
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+
+    - old: interestb4t
+      new: interestb4t
+
+    - old: costnpaamountb4t
+      new: costnpaamountb4t
+
+    - old: unearnedprofitamountb4t
+      new: unearnedprofitamountb4t
+
+    - old: deferedinterestb4t
+      new: deferedinterestb4t
+
+    - old: interestb4restb4t
+      new: interestb4restb4t
+
+    - old: penaltyamountb4t
+      new: penaltyamountb4t
+
+    - old: miscchargeb4t
+      new: miscchargeb4t
+
+    - old: otherchargeb4t
+      new: otherchargeb4t
+
+    - old: nextpaymentduedateb4t
+      new: nextpaymentduedateb4t
+
+    - old: interestpaymentduedateb4t
+      new: interestpaymentduedateb4t
+
+    # --- H-specific ratio/proportion columns (if present in regular table) ---
+    - old: sbtratio
+      new: sbtratio
+
+    - old: citratio
+      new: citratio
+
+    # NOTE: laformatnetpay, intascitproportion, intassbtproportion, sbtamount, localtax,
+    #   totaltax, sbtratio, citratio, sbtaslnaccureinterest — only in H table → excluded
+    # NOTE: runningbalance columns (currentbalancerunningbalance, etc.) — only in H table → excluded
+
+  transformed_matches:
+    # Total transaction amount — both tables have this column
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+
+    # Date columns: stored as ISO/nvarchar in one, datetime2 in other
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: fromdate
+      new: fromdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: todate
+      new: todate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: createdate
+      new: createdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: updatedate
+      new: updatedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: startinterestdate
+      new: startinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: endinterestdate
+      new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+  # bill* columns in regular table = creditXamount - debitXamount in H table
+  # Group-level: sum(credit group) - sum(debit group) vs sum(bill group)
+  formula_matches:
+    - old_cols: [creditprincipleamount, debitprincipleamount]
+      formula: SUBTRACT
+      new: billprinciple
+
+    - old_cols: [creditinterestamount, debitinterestamount]
+      formula: SUBTRACT
+      new: billinterest
+
+    - old_cols: [creditdeferedinterestamount, debitdeferedinterestamount]
+      formula: SUBTRACT
+      new: billdefered
+
+    - old_cols: [creditb4restinterestamount, debitb4restinterestamount]
+      formula: SUBTRACT
+      new: billinterestb4rest
+
+    - old_cols: [creditpenaltyamount, debitpenaltyamount]
+      formula: SUBTRACT
+      new: billpenalty
+
+    - old_cols: [creditmischargeamount, debitmischargeamount]
+      formula: SUBTRACT
+      new: billmiscd
+
+    - old_cols: [creditotherchargeamount, debitotherchargeamount]
+      formula: SUBTRACT
+      new: billothercharge

@@ -1,0 +1,178 @@
+# ============================================================
+# Case 2: TRANSACTION N:1 (conv → H aggregate)
+# conv$vinpainvesthist → ls$lshisthinvtransactionhistoryh
+#
+# Row cardinality:
+#   CONV groups (doctype=BF, tellerid=CONV): N old rows → 1 H row per group.
+#     Each old row's transactionamount maps to ONE lv* debit/credit column
+#     in H based on loantransaction code + debitcredit direction.
+#   LIVE groups (ITEM/non-CONV): present in H but NOT in conv.
+#     These will produce ROW_MISSING "found in target but not in source" — EXPECTED.
+#
+# Validation strategy:
+#   split_matches: SUM(conv.transactionamount per group) = SUM(all lv* columns in H row).
+#     Verifies total amount is preserved across the pivot/split into lv* columns.
+#   exact_matches: identity + direct pass-through fields.
+#   Format columns (lsformat*/laformat*): direct pass-through from conv.
+#     Group-level SUM is safe because typically only one row per conv group
+#     carries the format value (others are null/empty → sumColumn returns null → skipped).
+#
+# ANCHOR KEY NOTE: same as Case 1 — group key used as anchor (IDs not preserved).
+#   With TransactionStrategy now fetching by tg.keys.new, this is safe for the 1:1 case
+#   (sysref unique per row). For the N:1 case here, sysref repeats per group — pagination
+#   risk if chunk boundary falls mid-group, but negligible at chunkSize=5000 vs group_size≤5.
+#
+# Expected ROW_MISSING in report:
+#   ~83 groups (ITEM/live transactions) found in H but not in conv — normal.
+#   If CONV groups (PSA prefix) are missing → real migration issue.
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinpainvesthist]"
+  target: "[ncs-npl-aging].dbo.[ls$lshisthinvtransactionhistoryh]"
+  table_type: TRANSACTION
+
+anchor_key:
+  old: systemreferencenumber
+  new: systemreferenceno
+
+transaction_grouping:
+  keys:
+    old: systemreferencenumber
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+    - old: newaccountno
+      new: lsaccountno
+
+    - old: systemreferencenumber
+      new: systemreferenceno
+
+    - old: systemreferencenumber
+      new: orderno
+
+    - old: affectcode
+      new: affectcode
+
+    - old: chargetype
+      new: chargetype
+
+    - old: tellerid
+      new: tellerid
+
+    - old: servicebranch
+      new: servicebranch
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+
+    - old: interestb4t
+      new: interestb4t
+
+    - old: orgsystemreferencenumber
+      new: orgsystemreferencenumber
+
+    - old: doctype
+      new: doctype
+
+    - old: inputsourcesystem
+      new: inputsourcesystem
+
+    - old: remark
+      new: remark
+
+    - old: noofdays
+      new: noofdays
+
+    # --- Format columns: direct pass-through from conv → H ---
+    - old: lsformatdiffincome
+      new: lsformatdiffincome
+
+    - old: lsformatbfaccint
+      new: lsformatbfaccint
+
+    - old: lsformattdrdiffincome
+      new: lsformattdrdiffincome
+
+    - old: lsformatmodifygainloss
+      new: lsformatmodifygainloss
+
+    - old: laformatbfaccint
+      new: laformatbfaccint
+
+    - old: laformatbfggpayment
+      new: laformatbfggpayment
+
+    - old: laformatcreditpp
+      new: laformatcreditpp
+
+    - old: laformatggpayment
+      new: laformatggpayment
+
+    - old: laformatsumintpayment
+      new: laformatsumintpayment
+
+    # NOTE: laformatt9adjustpp is in old but NOT found in H columns — excluded
+
+  transformed_matches:
+    - old: eirrate
+      new: eirrate
+      transform_rule: NONE
+
+    - old: calculateintrate
+      new: calculateintrate
+      transform_rule: NONE
+
+    - old: calprovisionamount
+      new: calprovisionamount
+      transform_rule: NONE
+
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: startinterestdate
+      new: startinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: endinterestdate
+      new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+  # --- lv* split validation ---
+  # SUM of all old transactionamount per group = SUM of all lv* columns in H per group.
+  # Each old row's amount is routed to exactly one lv* debit or credit column.
+  # NOTE: For ITEM (live) groups, all lv* = 0 but old txamt > 0 → VALUE_MISMATCH expected.
+  split_matches:
+    - old: transactionamount
+      new_cols:
+        - lvcreditprincipleamount
+        - lvdebitprincipleamount
+        - lvcreditgaincash
+        - lvdebitgaincash
+        - lvcreditgainsettlement
+        - lvdebitgainsettlement
+        - lvcreditinterestamount
+        - lvdebitinterestamount
+        - lvcreditmischargeamount
+        - lvdebitmischargeamount
+        - lvcreditotherchargeamount
+        - lvdebitotherchargeamount
+        - lvcreditb1amount
+        - lvdebitb1amount
+        - lvcreditadjustpp
+        - lvdebitadjustpp
+      formula: SUM

@@ -18,10 +18,14 @@ table_info:
   target: "[ncs-npl-aging].dbo.[ln$lnhistloantransactionhistory]"
   table_type: TRANSACTION
 
-# Anchor key for keyset/cursor-based streaming
+# anchor_key: used ONLY for keyset pagination ordering (must be unique+monotonic per row).
+# id is auto-increment → safe keyset cursor. IDs are NOT preserved through migration,
+# but that is no longer an issue — TransactionStrategy now fetches new rows by
+# tg.keys.new (systemreferenceno), not by anchor_key.new.
+# anchor_key.new is a required schema field but unused for fetching in group-mode.
 anchor_key:
-  old: newaccountno       # old stores new-system account number
-  new: accountno
+  old: id
+  new: id
 
 # Group comparison by transaction reference number
 transaction_grouping:

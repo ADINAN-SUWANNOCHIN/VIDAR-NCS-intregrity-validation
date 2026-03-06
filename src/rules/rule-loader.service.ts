@@ -21,12 +21,13 @@ export class RuleLoaderService {
 
   // ----------------------------------------------------------------
   // Resolve the directory for a table's rules.
-  // If rulePath is provided:  {rulesDir}/{rulePath}/{tableName}/
+  // If rulePath is provided:  {rulesDir}/{rulePath}/
   // Fallback (legacy):        {rulesDir}/tables/{tableName}/
   // ----------------------------------------------------------------
   private resolveTableDir(tableName: string, rulePath?: string): string {
     if (rulePath) {
-      return path.join(this.rulesDir, rulePath, tableName);
+      // rule_path already uniquely identifies the case — no tableName subfolder needed
+      return path.join(this.rulesDir, rulePath);
     }
     return path.join(this.rulesDir, 'tables', tableName);
   }

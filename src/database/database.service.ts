@@ -251,6 +251,44 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Fetch a keyset-paginated chunk of KEY VALUES ONLY — no SELECT *.
+   *
+   * Semantically identical to fetchChunk but returns only the anchor key column.
+   * Used by MasterStrategy's reverse scan to detect extra rows in the target table
+   * without loading full rows. At 15M rows this reduces per-chunk bandwidth by
+   * ~100× compared to SELECT * — critical for the reverse scan's performance.
+   *
+   * Returns Record<string, unknown>[] (one field per row) so the raw typed value
+   * is preserved for bindLastKey (prevents string-comparison ordering on INT keys).
+   */
+  async fetchChunkKeys(
+    table: string,
+    keyColumn: string,
+    chunkSize: number,
+    lastKey: unknown,
+  ): Promise<Record<string, unknown>[]> {
+    const request = this.pool.request();
+    const whereClause =
+      lastKey === null
+        ? `WHERE [${keyColumn}] IS NOT NULL`
+        : `WHERE [${keyColumn}] > @lastKey`;
+
+    if (lastKey !== null) {
+      this.bindLastKey(request, lastKey);
+    }
+
+    const result = await request.query(`
+      SELECT [${keyColumn}]
+      FROM ${tableRef(table)} WITH (NOLOCK)
+      ${whereClause}
+      ORDER BY [${keyColumn}]
+      OFFSET 0 ROWS FETCH NEXT ${chunkSize} ROWS ONLY
+    `);
+
+    return result.recordset as Record<string, unknown>[];
+  }
+
+  /**
    * Fetch a small sample (TOP N) for noisy-column detection.
    * Strategies call this before the main loop to determine which columns
    * are all-null / all-zero / boolean-only and should use name-only matching.

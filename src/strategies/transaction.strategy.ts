@@ -52,6 +52,8 @@ export class TransactionStrategy extends BaseStrategy {
       ...(sm.exact_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
       ...(sm.split_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: m.new_cols })),
       ...(sm.transformed_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.concat_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
+      ...(sm.formula_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
     ]);
     if (colErrors.length > 0) {
       errors.push(...colErrors);
@@ -60,11 +62,14 @@ export class TransactionStrategy extends BaseStrategy {
       );
       sm = this.filterMappingsAfterSchemaCheck(sm, colErrors);
     }
+    errors.push(...await this.reportUnmappedColumns(source, target, sm, 'TXN'));
 
     // ---- Noisy column detection ----
     const allOldCols = [
       ...(sm.exact_matches ?? []).map((m) => m.old),
       ...(sm.split_matches ?? []).map((m) => m.old),
+      ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.formula_matches ?? []).flatMap((m) => m.old_cols),
     ];
     const noisyMap = await this.detectNoisyColumns(source, allOldCols);
     for (const [col, type] of noisyMap) {
@@ -96,18 +101,33 @@ export class TransactionStrategy extends BaseStrategy {
       const oldChunk = await this.db.fetchChunk(source, anchorKeyOld, chunkSize, lastAnchorKey);
       if (oldChunk.length === 0) break;
 
-      // Unique anchor key values in this chunk
-      const anchorVals = [...new Set(oldChunk.map((r) => String(r[anchorKeyOld] ?? '').trim()))];
-
-      // Fetch matching new rows by anchor key
-      const newRows: Record<string, unknown>[] = [];
-      await this.db.streamRowsByKeys(target, anchorKeyNew, anchorVals, (row) => newRows.push(row));
-
-      // Seed group maps with rows carried over from the previous chunk
+      // Seed group maps with rows carried over from the previous chunk.
+      // Must happen BEFORE computing groupKeyVals so we can exclude already-fetched groups (Bug 2 fix).
       const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
       const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
       carryOld = new Map();
       carryNew = new Map();
+
+      // Bug 1 fix: fetch new rows by GROUP KEY (tg.keys.new), not by anchor key.
+      //   anchor_key is a keyset pagination cursor only (must be unique+monotonic, e.g. id).
+      //   tg.keys is the cross-table join key (e.g. systemreferencenumber → systemreferenceno).
+      //   Without this fix, tables where IDs are not preserved through migration return 0 new rows
+      //   and every group is incorrectly flagged as ROW_MISSING.
+      //
+      // Bug 2 fix: exclude group keys already in newGroupMap (seeded from carryNew above).
+      //   carryNew holds ALL new rows for the carry group — they were fully fetched in the
+      //   previous chunk. Re-fetching that key would push duplicate rows into newGroupMap,
+      //   doubling group sums and producing false VALUE_MISMATCH errors.
+      //
+      // Performance (15M rows): at chunkSize=5000 and group_size≈2-5, each chunk produces
+      //   ~1000-2500 distinct group keys — within the 2000-key batch limit of streamRowsByKeys,
+      //   so each chunk triggers exactly one DB round-trip on the target side.
+      const groupKeyVals = [
+        ...new Set(oldChunk.map((r) => this.normalizeKey(r[oldKeyCol], tg.transform_key))),
+      ].filter((k) => k !== '' && !newGroupMap.has(k));
+
+      const newRows: Record<string, unknown>[] = [];
+      await this.db.streamRowsByKeys(target, newKeyCol, groupKeyVals, (row) => newRows.push(row));
 
       for (const row of oldChunk) {
         const key = this.normalizeKey(row[oldKeyCol], tg.transform_key);
@@ -177,6 +197,17 @@ export class TransactionStrategy extends BaseStrategy {
       }
       errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap));
       errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+    }
+
+    // Extra groups in target at chunk boundary
+    for (const [groupKey] of carryNew) {
+      if (!carryOld.has(groupKey)) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `Transaction group [${groupKey}] found in target but not in source (extra row at chunk boundary)`,
+        });
+      }
     }
 
     this.logger.log(`[TXN] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
@@ -258,8 +289,43 @@ export class TransactionStrategy extends BaseStrategy {
       }
     }
 
-    // concat_matches — concatenation has no meaningful group-level aggregate; skipped here.
-    // Individual concat mismatches are caught by the aggregate SUM check if the column is numeric.
+    for (const mapping of sm.concat_matches ?? []) {
+      if (mapping.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
+      const sep = mapping.separator ?? '';
+      const oldVals = [...new Set(oldGroup.map((r) => mapping.old_cols.map((c) => String(r[c] ?? '').trim()).join(sep)))].sort().join('|');
+      const newVals = [...new Set(newGroup.map((r) => String(r[mapping.new] ?? '').trim()))].sort().join('|');
+      if (oldVals !== newVals) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: mapping.old_cols.join('+'),
+          newColumn: mapping.new,
+          oldValue: oldVals,
+          newValue: newVals,
+          groupKey,
+          message: `Concat mismatch [${mapping.old_cols.join('+')}→${mapping.new}]: "${oldVals}" ≠ "${newVals}" (group: ${groupKey})`,
+        });
+      }
+    }
+
+    for (const mapping of sm.formula_matches ?? []) {
+      if (mapping.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
+      const oldInputs = mapping.old_cols.map((c) => this.sumColumn(oldGroup, c));
+      // If any source column is entirely null, skip (nothing to compare)
+      if (oldInputs.some((v) => v === null)) continue;
+      const oldComputed = TransformUtils.evaluateFormula(mapping.formula, oldInputs);
+      const newTotal = this.sumColumn(newGroup, mapping.new);
+      if (newTotal !== null && Math.abs(oldComputed - newTotal) > tolerance) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: mapping.old_cols.join(`${mapping.formula === 'SUBTRACT' ? '-' : '+'}`),
+          newColumn: mapping.new,
+          oldValue: oldComputed,
+          newValue: newTotal,
+          groupKey,
+          message: `Formula mismatch [${mapping.formula}(${mapping.old_cols.join(',')})→${mapping.new}]: ${oldComputed} ≠ ${newTotal} (group: ${groupKey})`,
+        });
+      }
+    }
 
     return errors;
   }

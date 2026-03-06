@@ -171,7 +171,7 @@ export class ValidationController {
       tables: entries.map((e) => ({
         table_name: e.table_name,
         rule_path: e.rule_path,
-        def_list: body.def_list ?? [],
+        def_list: body.def_list,  // undefined = load all; [] would filter out everything
       })),
     };
 

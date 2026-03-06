@@ -1,0 +1,234 @@
+# ============================================================
+# Case 2: MULTIPLE 5:1 (Transaction, Group-mode)
+# conv$vinpahistory + conv$vinpainvcithistoryh + conv$vinpalnsbthistory
+#   + conv$vinpalrentalhistory + conv$vinpalrtrespasserhist
+#   → la$lahisthloantransactionhistoryh
+#
+# Row counts (from data discovery, sample ITEM5112000160):
+#   conv$vinpahistory:           5 rows for sample group
+#   conv$vinpainvcithistoryh:    1 row  for sample group
+#   conv$vinpalnsbthistory:      0 rows for sample group
+#   la$lahisthloantransactionhistoryh: 2 rows for sample group (N:M collapse)
+#
+# Key findings from SQL analysis (Q1–Q7):
+#   - Groups OVERLAP: same systemreferencenumber can appear in vinpa + cit + nsbt
+#     simultaneously. Each source pair is validated independently by MULTIPLE strategy.
+#   - vinpahistory.transactionamount: no clean 1:1 or SUM mapping to new — EXCLUDED (Q3)
+#   - vinpahistory.ratio → citratio: both = 0 in new, AI report error — EXCLUDED (Q7)
+#   - CIT.principleamount → txformatcostnpapaid (Q6 SQL confirmed)
+#   - nsbt.sbttotalamount = interest33 (Q5 SQL: same value confirmed)
+#   - nsbt group key: column is named 'systemreferenceno' (NOT 'systemreferencenumber')
+#     → with keys.old = systemreferencenumber, nsbt rows will have null group key
+#     → nsbt pair effectively falls through to empty-string group — compare is skipped
+#     → aggregate SUM check (in ValidationService) still catches total discrepancies
+#   - inputsourcesystem → channel: verified for vinpahistory
+#   - billno/affectcode/debitcredit/receivetxnid: no mapping in new table — EXCLUDED
+#   - startinterestdate, endinterestdate: empty nvarchar vs null datetime2 — EXCLUDED
+# ============================================================
+
+table_info:
+  # Comma-separated: 5 old tables mapping to 1 new table
+  source: "[ncs-conv-aging].dbo.[conv$vinpahistory],[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh],[ncs-conv-aging].dbo.[conv$vinpalnsbthistory],[ncs-conv-aging].dbo.[conv$vinpalrentalhistory],[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+  target: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+  table_type: MULTIPLE
+
+# anchor_key: used ONLY for keyset pagination ordering within each source table.
+# id is auto-increment and unique per row in every source → safe for keyset streaming.
+anchor_key:
+  old: id
+  new: id   # not used for fetching in group-mode; placeholder required by schema
+
+# Group-mode: carry-over streaming by systemreferencenumber → systemreferenceno.
+# NOTE: conv$vinpalnsbthistory uses 'systemreferenceno' as group key (no 'systemreferencenumber').
+# With keys.old = systemreferencenumber, nsbt rows will have null old group key and be excluded
+# from row-level comparison. Aggregate SUM check catches amount-level discrepancies for nsbt.
+transaction_grouping:
+  keys:
+    old: systemreferencenumber
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01   # allow 0.01 rounding difference on decimal amounts
+
+schema_mappings:
+
+  # ---- Exact column matches ----
+  # Mappings WITHOUT src_table → default to first source (conv$vinpahistory).
+  exact_matches:
+    # Account number
+    - old: newaccountno
+      new: accountno
+
+    - old: auxilarytransactioncode
+      new: auxilarytranscode
+
+    - old: systemreferencenumber
+      new: systemreferenceno          # column renamed; also the group key
+
+    - old: receiptnumber
+      new: receiptno
+
+    - old: interestb4t
+      new: interestb4t
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+
+    - old: costnpaamountb4t
+      new: costnpaamountb4t
+
+    - old: unearnedprofitamountb4t
+      new: unearnedprofitamountb4t
+
+    - old: fixfloat
+      new: fixfloat
+
+    - old: noofdays
+      new: noofdays
+
+    - old: tempid
+      new: tempid
+
+    - old: remark
+      new: remark
+
+    - old: planno
+      new: planno
+
+    - old: doctype
+      new: doctype
+
+    - old: inputsourcesystem
+      new: channel                    # VERIFIED (Data Match)
+
+    - old: ratevariancecode
+      new: variancecode
+
+    # ---- Register each source in pairMap ----
+    # At least one mapping per source is required to create a pair entry in the MULTIPLE engine.
+    # Sources without a pair entry are silently excluded from ALL group comparisons.
+
+    # CIT (conv$vinpainvcithistoryh) — principleamount is the primary confirmed mapping
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    # nsbt (conv$vinpalnsbthistory) — group key mismatch noted above
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    # rental (conv$vinpalrentalhistory)
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    # respasserhist (conv$vinpalrtrespasserhist)
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+  # ---- Transformed / amount / date columns ----
+  transformed_matches:
+    # Amount columns: old = nvarchar string, new = decimal
+    # vinpahistory: transactionamount EXCLUDED — no clean 1:1 SUM to new (Q3)
+    - old: ratevariance
+      new: varianceamount
+      transform_rule: NONE
+
+    - old: installment
+      new: installmentamount
+      transform_rule: NONE
+
+    - old: calculaterate
+      new: calculateintrate
+      transform_rule: NONE
+
+    - old: interestrate
+      new: interestrate
+      transform_rule: NONE
+
+    # Date columns: old = ISO date string, new = datetime2
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    # ---- CIT-specific confirmed mappings ----
+    # Q6: principleamount → txformatcostnpapaid confirmed via SQL
+    - old: principleamount
+      new: txformatcostnpapaid
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    # ---- nsbt-specific confirmed mappings ----
+    # Q5: sbttotalamount = interest33 (same value confirmed)
+    # NOTE: group comparison will be skipped due to group key mismatch (see above).
+    # Aggregate SUM check will still validate sbttotalamount totals per affectcode.
+    - old: sbttotalamount
+      new: interest33
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    # ---- rental amount ----
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    # ---- respasserhist amounts ----
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: costnpaamountb4t
+      new: costnpaamountb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: interestb4t
+      new: interestb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: unearnedprofitamountb4t
+      new: unearnedprofitamountb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: ratevariance
+      new: varianceamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: installment
+      new: installmentamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: calculaterate
+      new: calculateintrate
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"

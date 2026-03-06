@@ -54,6 +54,17 @@ export interface ConcatMatch {
 }
 
 /**
+ * Apply an arithmetic formula across multiple source columns and compare result to one target column.
+ * e.g. creditprincipleamount - debitprincipleamount → billprinciple
+ * Uses FormulaType: SUBTRACT = old_cols[0] - old_cols[1] - ..., SUM = sum of all old_cols
+ */
+export interface FormulaMatch {
+  old_cols: string[];    // e.g. ['creditprincipleamount', 'debitprincipleamount']
+  formula: FormulaType;  // SUBTRACT | SUM | EXACT
+  new: string;           // e.g. 'billprinciple'
+}
+
+/**
  * HEADER (Pivot): one row per (identity_key × pivot_key_value) in old table
  * maps to one row per identity_key in new table with each pivot_key_value as a column.
  */
@@ -68,7 +79,8 @@ export interface SchemaMappings {
   split_matches?: SplitMatch[];
   transformed_matches?: TransformedMatch[];
   concat_matches?: ConcatMatch[];
-  pivot_matches?: PivotMatch[];   // HEADER type only
+  formula_matches?: FormulaMatch[];  // TRANSACTION / MASTER: multi-col arithmetic → one target col
+  pivot_matches?: PivotMatch[];      // HEADER type only
 }
 
 export interface TransactionGrouping {

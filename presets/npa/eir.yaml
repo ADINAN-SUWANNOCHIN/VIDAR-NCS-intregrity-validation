@@ -1,9 +1,26 @@
-name: EIR
+name: EIR NPA
 module: npa
-description: "PLACEHOLDER — fill table names once mapping is confirmed."
+description: "NPA EIR tables (ls$ prefix). conv$vinpainvesthist → ls$lshistinvtransactionhistory (1:1) and → ls$lshisthinvtransactionhistoryh (N:1 aggregate)."
 
 cases:
-  - name: placeholder
-    rule_path: PLACEHOLDER_npa_eir
+  # ---------------------------------------------------------------
+  # Case 1: TRANSACTION 1:1
+  # conv$vinpainvesthist → ls$lshistinvtransactionhistory
+  # Same row count per group. Direct field mappings.
+  # ---------------------------------------------------------------
+  - name: lshistinvtransactionhistory
+    rule_path: eir_npa/lshistinvtransactionhistory
     tables:
-      - PLACEHOLDER_TABLE_1
+      - "conv$vinpainvesthist"
+
+  # ---------------------------------------------------------------
+  # Case 2: TRANSACTION N:1 (conv → H aggregate)
+  # conv$vinpainvesthist → ls$lshisthinvtransactionhistoryh
+  # N old rows per group → 1 H row per group (for CONV groups).
+  # split_matches validate total amount preserved in lv* columns.
+  # ROW_MISSING for ITEM/live groups in H is expected (not from conv).
+  # ---------------------------------------------------------------
+  - name: lshisthinvtransactionhistoryh
+    rule_path: eir_npa/lshisthinvtransactionhistoryh
+    tables:
+      - "conv$vinpainvesthist"

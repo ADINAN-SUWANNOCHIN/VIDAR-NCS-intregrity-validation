@@ -35,6 +35,12 @@ interface ConcatMatchTask {
   separator?: string;
 }
 
+interface FormulaMatchTask {
+  old_cols: string[];
+  formula: 'SUM' | 'SUBTRACT' | 'EXACT';
+  new: string;
+}
+
 export interface CompareTask {
   oldChunk: Record<string, unknown>[];
   /**
@@ -50,6 +56,7 @@ export interface CompareTask {
   splitMatches: SplitMatchTask[];
   transformedMatches: TransformedMatchTask[];
   concatMatches: ConcatMatchTask[];
+  formulaMatches: FormulaMatchTask[];
   tolerance: number;
   baseIndex: number;
   /** Column-level noisy classification sampled before the loop */
@@ -85,6 +92,7 @@ function compareChunk(task: CompareTask): CompareResult {
     splitMatches,
     transformedMatches,
     concatMatches,
+    formulaMatches,
     tolerance,
     baseIndex,
     noisyColumns,
@@ -206,6 +214,30 @@ function compareChunk(task: CompareTask): CompareResult {
           newValue: newVal,
           rowIdentifier: rowId,
           message: `Concat mismatch on [${m.old_cols.join('+')}→${m.new}]: "${concatenated}" ≠ "${newVal}" (${rowId})`,
+        });
+      }
+    }
+
+    // ---- formula matches ----
+    for (const m of formulaMatches) {
+      if (m.old_cols.some((c) => shouldSkip(c, noisyColumns))) continue;
+
+      const oldInputs = m.old_cols.map((c) => oldRow[c]);
+      // Skip if any source column is null for this row
+      if (oldInputs.some((v) => v === null || v === undefined)) continue;
+
+      const computed = TransformUtils.evaluateFormula(m.formula, oldInputs);
+      const newVal = parseFloat(String(newRow[m.new] ?? 0));
+
+      if (Math.abs(computed - newVal) > tolerance) {
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: m.old_cols.join(m.formula === 'SUBTRACT' ? '-' : '+'),
+          newColumn: m.new,
+          oldValue: computed,
+          newValue: newVal,
+          rowIdentifier: rowId,
+          message: `Formula mismatch [${m.formula}(${m.old_cols.join(',')})→${m.new}]: ${computed} ≠ ${newVal} (${rowId})`,
         });
       }
     }
