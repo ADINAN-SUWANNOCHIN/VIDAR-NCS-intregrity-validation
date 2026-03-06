@@ -97,8 +97,10 @@ export class TransactionStrategy extends BaseStrategy {
     let carryOld = new Map<string, Record<string, unknown>[]>();
     let carryNew = new Map<string, Record<string, unknown>[]>();
 
+    const sourceFilter = commonRule.table_info.source_filter;
+
     while (true) {
-      const oldChunk = await this.db.fetchChunk(source, anchorKeyOld, chunkSize, lastAnchorKey);
+      const oldChunk = await this.db.fetchChunk(source, anchorKeyOld, chunkSize, lastAnchorKey, sourceFilter);
       if (oldChunk.length === 0) break;
 
       // Seed group maps with rows carried over from the previous chunk.

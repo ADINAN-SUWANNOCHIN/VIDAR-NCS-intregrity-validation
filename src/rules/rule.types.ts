@@ -103,6 +103,7 @@ export interface CommonRule {
     source: string;     // table reference — comma-separated for UNION/MULTIPLE
     target: string;     // target table reference — comma-separated for MULTIPLE
     table_type: TableType;
+    source_filter?: string;  // optional SQL WHERE condition on old table (e.g. "invaccounttype = 'TF'")
   };
   anchor_key: {
     old: string;        // cursor column name in old table — used for keyset streaming
