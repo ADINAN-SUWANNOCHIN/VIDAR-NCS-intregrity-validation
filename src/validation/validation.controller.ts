@@ -7,6 +7,7 @@ import {
   NotFoundException,
   HttpCode,
   HttpStatus,
+  Header,
 } from '@nestjs/common';
 import { IsArray, IsOptional, IsString } from 'class-validator';
 import { ValidationService } from './validation.service';
@@ -42,6 +43,17 @@ export class ValidationController {
     private readonly jobService: JobService,
     private readonly presetService: PresetService,
   ) {}
+
+  /**
+   * GET /health
+   * Kubernetes liveness + readiness probe target.
+   * Returns 200 so the pod stays alive and receives traffic.
+   */
+  @Get('/health')
+  @Header('Content-Type', 'application/json')
+  health(): { status: string } {
+    return { status: 'ok' };
+  }
 
   /**
    * POST /validation/run
