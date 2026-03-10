@@ -1,0 +1,232 @@
+# ============================================================
+# invest_lv / lvhistinvtransactionhistory
+# TRANSACTION: conv$vinpllvhistory → lv$lvhistinvtransactionhistory
+#
+# Verified against:
+#   - 4COMMON6.xlsx (mapping report)
+#   - 1000-row CSV samples (correct_data/6/)
+#
+# This is the main LV investment transaction detail history.
+# All vinpllvhistory rows are expected to land here (no source_filter).
+# Compare with: lvhisthsum (Case 2) which is a P-prefix summary table.
+#
+# ANCHOR KEY NOTE:
+#   IDs are NOT preserved through migration (old id ≠ new id).
+#   anchor_key.old = id (auto-increment, keyset pagination cursor only).
+#   anchor_key.new = id (required field, unused in group mode).
+#
+# ---- CONCERNS (must verify on live DB before trusting results) ----
+#
+# ---- VERIFIED FINDINGS (from live DB 2026-03-10) ----
+#
+# [C1] interestb4t: both old and new have exactly 6,172,718 non-zero rows — data IS there.
+#      However, old stores the same group-level balance repeated for every row in the group
+#      (e.g. all 5 rows for P6303-005209 have interestb4t=12951.41), while new stores
+#      per-row varying values (12951.41, 0, 12115.82, 24231.83, 0).
+#      SUM(old group) ≠ SUM(new group) for most groups → VALUE_MISMATCH flood.
+#      → EXCLUDED from transformed_matches. Marked PLACEHOLDER below.
+#
+# [C2] calculateintrate: new has 4,374,840 non-zero rows — data IS there.
+#      Same per-row variation pattern as C1: old repeats same rate for entire group,
+#      new stores varying rates per row. Group sum comparison unreliable.
+#      → EXCLUDED from transformed_matches. Marked PLACEHOLDER below.
+#
+# [C3] newaccountno → lvaccountno: CONFIRMED. Live join shows
+#      old.newaccountno = 11041000023 = new.lvaccountno. Exact match.
+#      old.accountno (short legacy ID '000001') does NOT match. Skip accountno.
+#      → ADDED to exact_matches below.
+#
+# [C4] chargetype → expensecode: CONFIRMED. old.chargetype = 'EXP0349' →
+#      new.expensecode = 'EXP0349'. new.chargetype column is NULL always.
+#      Some new rows have empty expensecode for the same sysref (partial fill).
+#      Alphanumeric column → sumColumn returns null → value check skipped, but
+#      column is registered as mapped (avoids DATA_MISSING in report).
+#      → ADDED to exact_matches below.
+#
+# [C5] gaincashbalanceb4t: old has 1,355,772 non-zero rows — NOT all zeros globally.
+#      Sample was from a zero-heavy date window. Mapping is valid.
+#
+# [C6] keydate / _keydate → createddate:
+#      keydate UTC+7 converts correctly to UTC (00:02+07:00 = 17:02 UTC) but
+#      per-row times are still off by 1–2 minutes vs new createddate.
+#      _keydate stores Bangkok time labeled as Z (wrong TZ label) — always 7h off.
+#      Neither maps reliably → both remain PLACEHOLDER.
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
+  target: "[ncs-npl-aging].dbo.[lv$lvhistinvtransactionhistory]"
+  table_type: TRANSACTION
+
+anchor_key:
+  old: id
+  new: id
+
+transaction_grouping:
+  keys:
+    old: systemreferenceno
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+
+    # --- Identity / code columns (VERIFIED Set Match) ---
+    - old: systemreferenceno
+      new: systemreferenceno
+
+    - old: debitcredit
+      new: debitcredit
+
+    - old: affectcode
+      new: affectcode
+
+    - old: loantranshostcode
+      new: loantranshostcode
+
+    - old: doctype
+      new: doctype
+
+    # inputsourcesystem renamed to channel in new system (VERIFIED Set Match)
+    - old: inputsourcesystem
+      new: channel
+
+    # auxilarytransaction renamed to auxilarytranscode (VERIFIED Set Match)
+    - old: auxilarytransaction
+      new: auxilarytranscode
+
+    # --- Text / reference columns (AI_VERIFIED) ---
+    - old: remark
+      new: remark
+
+    - old: noofdays
+      new: noofdays
+
+    - old: runningno
+      new: runningno
+
+    - old: tempid
+      new: tempid
+
+    - old: docnoexpense
+      new: docnoexpense
+
+    # newaccountno → lvaccountno: VERIFIED on live DB (C3)
+    # old.newaccountno = 11041000023 = new.lvaccountno (exact match)
+    - old: newaccountno
+      new: lvaccountno
+
+    # chargetype → expensecode: VERIFIED on live DB (C4)
+    # new.chargetype column is always NULL; values migrated to expensecode
+    - old: chargetype
+      new: expensecode
+
+  transformed_matches:
+
+    # --- Date columns: old = ISO string (with or without +07:00 TZ), new = datetime2 ---
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: gldate
+      new: gldate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: startinterestdate
+      new: startinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    - old: endinterestdate
+      new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    # --- Amount columns: old = nvarchar, new = decimal (NONE = string trim only) ---
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+
+    - old: paymentamount
+      new: paymentamount
+      transform_rule: NONE
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+
+    - old: gaincashbalanceb4t
+      new: gaincashbalanceb4t
+      transform_rule: NONE
+      # NOTE: old 1000-row sample all zeros → will be classified ZERO (noisy) and skipped.
+      # See concern [C5] in header.
+
+    - old: gainsettlementbalanceb4t
+      new: gainsettlementbalanceb4t
+      transform_rule: NONE
+
+    - old: penaltyamountb4t
+      new: penaltyamountb4t
+      transform_rule: NONE
+
+    - old: calprovisionamount
+      new: calprovisionamount
+      transform_rule: NONE
+
+    # interestb4t excluded — see CONCERN [C1] in header.
+    # Old repeats same group-level balance for all rows; new stores per-row values.
+    # Group sum comparison produces VALUE_MISMATCH flood — not a real migration error.
+
+    # --- Rate columns: old may be ".0235" (leading dot, nvarchar), new = decimal ---
+    - old: yieldrate
+      new: yieldrate
+      transform_rule: STRIP_LEADING_ZEROS
+
+    - old: irrrate
+      new: irrrate
+      transform_rule: STRIP_LEADING_ZEROS
+
+    # calculateintrate excluded — see CONCERN [C2] in header.
+    # Old repeats same rate for all rows in group; new stores varying per-row values.
+    # Group sum comparison unreliable — not a real migration error.
+
+    # ceirrate renamed to ceir in new system (AI_VERIFIED)
+    - old: ceirrate
+      new: ceir
+      transform_rule: STRIP_LEADING_ZEROS
+
+  # ---- PLACEHOLDERS (require live DB verification before adding) ----
+
+  # PLACEHOLDER: accountno (old, short int e.g. '000001') → lvaccountno
+  #   VERIFIED wrong — old.accountno is a short legacy ID, not the migration account number.
+  #   Correct mapping is newaccountno → lvaccountno (already in exact_matches above).
+
+  # PLACEHOLDER: interestb4t — EXCLUDED (see C1 in header)
+  #   Old stores group-level balance repeated per row; new stores per-row values.
+  #   Cannot validate via group sum. No simple workaround in current engine.
+
+  # PLACEHOLDER: calculateintrate — EXCLUDED (see C2 in header)
+  #   Same per-row variation issue as interestb4t. Cannot validate via group sum.
+
+  # PLACEHOLDER: tellerid (old int e.g. 2174) → tellerid (new alpha e.g. 'anupong')
+  #   TYPE MISMATCH — numeric code vs AD username. Skip value comparison.
+  #   Use global def001 (FIELD_VALUE_CHECK) for username format validation instead.
+
+  # PLACEHOLDER: keydate / _keydate → createddate
+  #   COLLISION — two old columns compete for createddate. Times differ from new.
+  #   _keydate = '2024-01-02 08:09:00.000' vs createddate = '2024-01-02 00:39:00.000'
+  #   May be TZ offset (UTC+7 → UTC) but difference is inconsistent. MANUAL_CHECK [C6].
+
+  # PLACEHOLDER: id (old) → id (new): CODE CHANGE — regenerated, skip
+  # PLACEHOLDER: orgsystemreferencenumber — EMPTY_COLUMN in old, skip
+  # PLACEHOLDER: createdate — EMPTY_COLUMN in old, skip
+  # PLACEHOLDER: severity — EMPTY_COLUMN in old, skip
+  # PLACEHOLDER: success / successlv2 / conversionstatus — migration tracking flags, skip
+  # PLACEHOLDER: line — internal sequence, skip
+  # PLACEHOLDER: content — raw concat field, skip
+  # PLACEHOLDER: _transactiondate / _effectivedate / _keydate — staging temp columns, skip

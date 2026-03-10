@@ -1,0 +1,243 @@
+# ============================================================
+# rights_npl / lnhisthloantransactionhistoryh
+# MULTIPLE 2:1 (TRANSACTION mode):
+#   conv$vinplsbthistory  → ln$lnhisthloantransactionhistoryh
+#   conv$vinplhistory     → ln$lnhisthloantransactionhistoryh
+#
+# Verified against:
+#   - 4COMMON5.xlsx (mapping report, Sheet 1 + Sheet 2)
+#   - 1000-row CSV samples (correct_data/5/)
+#   - Live DB queries on 172.18.1.153
+#
+# Row counts:
+#   SBT: 955,425 rows / 955,040 distinct sysrefs
+#   H:  5,595,976 rows / 1,596,389 distinct sysrefs
+#   H sysrefs > SBT sysrefs — H also receives rows from vinplhistory
+#
+# H table is a double-entry ledger: each sysref produces
+#   2 H rows (1 credit row + 1 debit row).
+#
+# ADJ-* sysrefs are EXCLUDED here (source_filter above).
+# They are validated in: lnhisthloantransactionhistoryh_adj/
+#
+# SPECIAL INTEREST COLUMNS (tracked in def001.yaml):
+#   interestpaid  → creditinterestamount (credit row) + debitinterestamount (debit row)
+#                   Both rows carry the same value (double-entry pattern)
+#   interest33    ≈ sbttotalamount (within 0.01 tolerance) → totaltax
+#                   (interest33 = interestpaid × 3.3% WHT)
+#   interestb4t   → interestb4t (direct 1:1, VERIFIED)
+#
+# GROUP KEY NOTE:
+#   vinplsbthistory uses column: systemreferenceno  (matches H)
+#   vinplhistory    uses column: systemreferencenumber (different name)
+#   Engine will look for 'systemreferenceno' in vinplhistory rows →
+#   groupKey='' for all vinplhistory rows → produces 1 ROW_MISSING for
+#   the '' group (documented acceptable behavior for MULTIPLE strategy)
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinplsbthistory],[ncs-conv-aging].dbo.[conv$vinplhistory]"
+  target: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+  table_type: MULTIPLE
+  source_filter: "systemreferenceno NOT LIKE 'ADJ-%'"
+  # ADJ-* sysrefs excluded here — validated separately in lnhisthloantransactionhistoryh_adj/
+
+# anchor_key: keyset pagination cursor — from first source (vinplsbthistory)
+# id is auto-increment in vinplsbthistory → safe cursor
+anchor_key:
+  old: id
+  new: id
+
+# Group by transaction reference number
+# NOTE: vinplsbthistory.systemreferenceno  ← matches keys.old below
+#       vinplhistory.systemreferencenumber ← different name, overridden by source_key_aliases
+transaction_grouping:
+  keys:
+    old: systemreferenceno
+    new: systemreferenceno
+  source_key_aliases:
+    "[ncs-conv-aging].dbo.[conv$vinplhistory]": systemreferencenumber
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+
+    # --- SOURCE REGISTRATION: vinplsbthistory (PRIMARY) ---
+    # Must have at least one entry with src_table to register source
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: accounttype
+      new: accounttype
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: currency
+      new: currency
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # Same column name in both sbt and H (no rename)
+    - old: systemreferenceno
+      new: systemreferenceno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # sbtratio / citratio — both zero in sample but verified column exists
+    - old: sbtratio
+      new: sbtratio
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: citratio
+      new: citratio
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # PLACEHOLDER: tellerid (sbt) → tellerid (H)
+    #   OLD: numeric code e.g. 2174
+    #   NEW: username string e.g. 'waratchathon.k'
+    #   TYPE MISMATCH — different data entirely, skip
+
+    # PLACEHOLDER: accountbranch (sbt) → servicebranch (H) — AI_VERIFIED in report
+    #   but H.servicebranch was always 0 in the 1000-row BF sample → MANUAL_CHECK
+
+    # PLACEHOLDER: servicebranch (sbt nvarchar '811030') → ??? in H
+    #   H.servicebranch not confirmed — MANUAL_CHECK
+
+    # PLACEHOLDER: ordernumber (sbt) → EMPTY_COLUMN in old (confirmed)
+    # PLACEHOLDER: journalseqno (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: orgjournalseqno (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: eventcode (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: glgroupcode (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: costcenter (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: inputsourcesystem (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: reversalflag (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: orgsystemreferenceno (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: createdate (sbt datetime2) → EMPTY_COLUMN in old
+    # PLACEHOLDER: severity (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: remark (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: _effectivedate (sbt) → EMPTY_COLUMN in old
+    # PLACEHOLDER: _transactiondate (sbt) → EMPTY_COLUMN in old
+
+    # PLACEHOLDER: citinterest (sbt) → EMPTY_COLUMN in old (always 0, confirmed)
+    # PLACEHOLDER: expensepaid (sbt) → EMPTY_COLUMN in old (always 0 in sample)
+    # PLACEHOLDER: clientno / newclientno (sbt) → not in H, staging columns
+
+    # PLACEHOLDER: success/successlv2/conversionstatus → migration tracking flags, skip
+    # PLACEHOLDER: line → internal sequence, skip
+    # PLACEHOLDER: content → raw concat field, skip
+    # PLACEHOLDER: id (sbt) → id (H): regenerated, skip
+
+    # --- SOURCE REGISTRATION: vinplhistory (SECONDARY) ---
+    # vinplhistory uses systemreferencenumber (not systemreferenceno) as group key
+    # Engine will miss group key → vinplhistory rows grouped as '' → 1 ROW_MISSING
+    # Columns below are registered to formally declare the source.
+    # Column-level validation of vinplhistory→H aggregations is handled in def001.yaml
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # PLACEHOLDER: loantransactioncode (vinplhistory) → loantranshostcode (H)
+    #   Report: "DATA missing" — loantranshostcode in H is empty for BF rows
+    #   Aggregation of N vinplhistory rows → H debit/credit columns — complex pivot
+    #   Not mapped at column level; verified via def rule
+
+    # PLACEHOLDER: transactionamount (vinplhistory) → debitprincipleamount/creditprincipleamount (H)
+    #   vinplhistory D rows → debitprincipleamount, C rows → creditprincipleamount
+    #   Verified via def rule
+
+    # PLACEHOLDER: debitcredit (vinplhistory) → used for pivot direction, not a column match
+    # PLACEHOLDER: affectcode (vinplhistory) → MISSING in H (no equivalent column)
+    # PLACEHOLDER: interestb4t (vinplhistory) → different from sbt.interestb4t;
+    #   vinplhistory.interestb4t is per-row running interest, sbt.interestb4t is group summary
+    # PLACEHOLDER: currentbalanceb4t (vinplhistory) → separate from sbt.principleb4t
+    # PLACEHOLDER: All vinplhistory-only columns (lgo1flag, lgo2flag, receiptnumber, etc.)
+    #   → not present in H, they go to lnhistloantransactionhistory (Case 1 rule)
+
+  transformed_matches:
+
+    # Date columns: old = ISO nvarchar, new = datetime2
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # Amount columns: old = nvarchar, new = decimal
+    # transactionamount: old SBT principal payment, H transactionamount
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # principleb4t → currentbalanceb4t: VERIFIED (97425.59 = 97425.59, 103346.75 = 103346.75)
+    - old: principleb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # interestb4t → interestb4t: DIRECT MATCH
+    # NOTE: For normal (P-prefix) sysrefs, old.interestb4t = 0 always.
+    #       Non-zero values only occur for ADJ sysrefs (e.g. ADJ6211-1092: 200.19).
+    #       ADJ sysrefs are excluded by source_filter — validated in _adj rule.
+    #       This mapping validates 0=0 for normal sysrefs (safe, no false positives).
+    - old: interestb4t
+      new: interestb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # SBT tax breakdown (all VERIFIED):
+    #   sbtrevenue=1848.29 → sbtamount=1848.29 ✓
+    #   sbtrevenueamount=184.83 → localtax=184.83 ✓
+    #   sbttotalamount=2033.12 → totaltax=2033.12 ✓
+    - old: sbtrevenue
+      new: sbtamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: sbtrevenueamount
+      new: localtax
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: sbttotalamount
+      new: totaltax
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # PLACEHOLDER: interest33 (sbt nvarchar) → totaltax (H decimal)
+    #   VERIFIED: interest33 = sbttotalamount ± 0.01 in all tested samples
+    #   (interest33 = interestpaid × 3.3% WHT; sbttotalamount = sbtrevenue + sbtrevenueamount)
+    #   Both map to the same new column totaltax — validated in def001.yaml
+    #   Cannot include here as separate transformed_match (same new target as sbttotalamount)
+
+  split_matches:
+    # interestpaid: VERIFIED double-entry pivot
+    #   H Row 1 (credit entry): creditinterestamount = interestpaid
+    #   H Row 2 (debit entry):  debitinterestamount  = interestpaid
+    #   SUM(old.interestpaid per group) = SUM(new.creditinterestamount per group) ✓
+    #   ADJ-* sysrefs excluded by source_filter — no exception needed here
+    - old_cols: [interestpaid]
+      formula: SUM
+      new: creditinterestamount
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"

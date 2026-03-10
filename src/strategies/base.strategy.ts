@@ -360,11 +360,10 @@ export abstract class BaseStrategy {
     if (action.check_type === 'ROW_LEVEL_COHESION') {
       const resolvedVars: Record<string, number> = {};
 
-      // C5: evaluateExpression throws on unparseable expression — catch here so other DEF
-      // rules in the same group still run (error is recorded, not propagated).
+      // Evaluate all variable expressions — catch per-variable so other DEF rules still run.
       try {
         for (const [varName, expr] of Object.entries(action.variables ?? {})) {
-          resolvedVars[varName] = this.evaluateExpression(String(expr), oldGroup);
+          resolvedVars[varName] = this.evaluateExpression(String(expr), oldGroup, newGroup);
         }
       } catch (e: any) {
         errors.push({
@@ -376,13 +375,30 @@ export abstract class BaseStrategy {
         return errors;
       }
 
-      const conditionMet = this.evaluateCondition(action.condition, newGroup, resolvedVars, tolerance);
+      let conditionMet: boolean;
+      try {
+        conditionMet = this.evaluateCondition(action.condition, resolvedVars, tolerance);
+      } catch (e: any) {
+        errors.push({
+          errorType: 'TRANSFORM_ERROR',
+          defId,
+          groupKey,
+          message: `DEF condition evaluation error (${defId}): ${e.message}`,
+        });
+        return errors;
+      }
+
       if (!conditionMet) {
+        // Interpolate {var_name} placeholders in error_message with resolved values
+        const interpolated = String(action.error_message ?? '').replace(
+          /\{(val_\w+)\}/g,
+          (_, name) => (name in resolvedVars ? String(resolvedVars[name]) : `{${name}}`),
+        );
         errors.push({
           errorType: 'DEFECT_VIOLATION',
           defId,
           groupKey,
-          message: action.error_message,
+          message: interpolated,
         });
       }
     }
@@ -471,42 +487,113 @@ export abstract class BaseStrategy {
     return errors;
   }
 
-  protected evaluateExpression(expr: string, rows: Record<string, unknown>[]): number {
-    const sumMatch = expr.match(/SUM\((?:old\.)?(\w+)\)\s+WHERE\s+(\w+)\s*==\s*'([^']+)'/i);
-    if (sumMatch) {
-      const [, col, filterCol, filterVal] = sumMatch;
-      return rows
+  /**
+   * Evaluates a DEF variable expression against old and/or new rows.
+   *
+   * Supported formats:
+   *   SUM(old.col)                       — sum of col across all old rows
+   *   SUM(new.col)                       — sum of col across all new rows
+   *   SUM(old.col[filterCol=val])        — conditional sum (bracket filter)
+   *   SUM(old.col) WHERE filterCol == 'val'  — same as bracket filter (legacy syntax)
+   *   COUNT(old)                         — number of old rows in this group
+   *   COUNT(new)                         — number of new rows in this group
+   */
+  protected evaluateExpression(
+    expr: string,
+    oldRows: Record<string, unknown>[],
+    newRows: Record<string, unknown>[],
+  ): number {
+    const t = expr.trim();
+
+    // SUM(old.col) WHERE filterCol == 'val'  — legacy WHERE filter syntax
+    const whereMatch = t.match(/^SUM\(old\.(\w+)\)\s+WHERE\s+(\w+)\s*==\s*'([^']+)'$/i);
+    if (whereMatch) {
+      const [, col, filterCol, filterVal] = whereMatch;
+      return oldRows
         .filter((r) => String(r[filterCol] ?? '').toUpperCase() === filterVal.toUpperCase())
         .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
     }
-    // C5: throw instead of silently returning 0 — caller (evaluateDefAction) catches this
-    // and records a TRANSFORM_ERROR so the malformed expression is visible in the report.
+
+    // SUM(old.col[filterCol=val])  — bracket filter (shorter YAML syntax)
+    const bracketMatch = t.match(/^SUM\(old\.(\w+)\[(\w+)=([^\]]+)\]\)$/i);
+    if (bracketMatch) {
+      const [, col, filterCol, filterVal] = bracketMatch;
+      return oldRows
+        .filter((r) => String(r[filterCol] ?? '').toUpperCase() === filterVal.trim().toUpperCase())
+        .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
+    }
+
+    // SUM(old.col)  — plain sum across all old rows
+    const oldSumMatch = t.match(/^SUM\(old\.(\w+)\)$/i);
+    if (oldSumMatch) {
+      return oldRows.reduce((sum, r) => sum + (parseFloat(String(r[oldSumMatch[1]] ?? 0)) || 0), 0);
+    }
+
+    // SUM(new.col)  — plain sum across all new rows
+    const newSumMatch = t.match(/^SUM\(new\.(\w+)\)$/i);
+    if (newSumMatch) {
+      return newRows.reduce((sum, r) => sum + (parseFloat(String(r[newSumMatch[1]] ?? 0)) || 0), 0);
+    }
+
+    // COUNT(old) / COUNT(new)
+    if (/^COUNT\(old\)$/i.test(t)) return oldRows.length;
+    if (/^COUNT\(new\)$/i.test(t)) return newRows.length;
+
     throw new Error(
       `DEF rule expression not parseable: "${expr}" — ` +
-      `supported format: SUM(old.columnName) WHERE filterColumn == 'value'`,
+      `supported: SUM(old.col), SUM(new.col), SUM(old.col[filterCol=val]), COUNT(old), COUNT(new)`,
     );
   }
 
+  /**
+   * Evaluates a DEF condition string after variable substitution.
+   *
+   * All variables in `vars` are substituted by value, then the expression is
+   * evaluated as JavaScript arithmetic. The `==` operator is treated as a
+   * tolerance-aware equality check: Math.abs(left - right) <= tolerance.
+   *
+   * Examples:
+   *   "val_a == val_b"            → Math.abs(a - b) <= tolerance
+   *   "val_a + val_b == 0"        → Math.abs((a + b) - 0) <= tolerance
+   *   "val_credit == 0"           → Math.abs(credit - 0) <= tolerance
+   */
   protected evaluateCondition(
     condition: string,
-    newGroup: Record<string, unknown>[],
     vars: Record<string, number>,
     tolerance: number,
   ): boolean {
-    const checks: Array<{ col: string; varName: string }> = [];
-    const pattern = /target\.(\w+)\s*==\s*(val_\w+)/g;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(condition)) !== null) {
-      checks.push({ col: match[1], varName: match[2] });
+    // Substitute all variable names with their numeric values.
+    // Word-boundary matching ensures val_credit won't partially replace val_credit_interest.
+    let expr = condition;
+    for (const [name, value] of Object.entries(vars)) {
+      expr = expr.replace(new RegExp(`\\b${name}\\b`, 'g'), String(value));
     }
-    if (checks.length === 0) return true;
-    return newGroup.some((row) =>
-      checks.every((chk) => {
-        const expected = vars[chk.varName] ?? 0;
-        const actual = parseFloat(String(row[chk.col] ?? 0)) || 0;
-        return Math.abs(actual - expected) <= tolerance;
-      }),
-    );
+
+    // Find a standalone == (not part of !=, <=, >=) and rewrite as tolerance-aware comparison.
+    const eqIdx = expr.search(/(?<![!<>=])==(?!=)/);
+    if (eqIdx >= 0) {
+      const left = expr.slice(0, eqIdx).trim();
+      const right = expr.slice(eqIdx + 2).trim();
+      try {
+        // eslint-disable-next-line no-new-func
+        const lv = new Function(`return (${left});`)() as number;
+        // eslint-disable-next-line no-new-func
+        const rv = new Function(`return (${right});`)() as number;
+        return Math.abs(lv - rv) <= tolerance;
+      } catch (e: any) {
+        throw new Error(
+          `DEF condition evaluation failed: "${condition}" (left="${left}", right="${right}"): ${e.message}`,
+        );
+      }
+    }
+
+    // No == — evaluate as a boolean expression (e.g. "val_a > 0")
+    try {
+      // eslint-disable-next-line no-new-func
+      return !!new Function(`return (${expr});`)();
+    } catch (e: any) {
+      throw new Error(`DEF condition evaluation failed: "${condition}": ${e.message}`);
+    }
   }
 
   protected sumColumn(rows: Record<string, unknown>[], col: string): number | null {

@@ -1,0 +1,121 @@
+# ============================================================
+# def001 — Interest Pivot Integrity Check
+# Scope: rights_npl / lnhisthloantransactionhistoryh
+#
+# Validates that the 3 special interest columns from conv$vinplsbthistory
+# were correctly pivoted into ln$lnhisthloantransactionhistoryh.
+#
+# Business rules:
+#   1. interestpaid  → must appear in BOTH creditinterestamount AND debitinterestamount
+#      (H is a double-entry ledger: each normal transaction = 1 credit row + 1 debit row)
+#   2. interest33    ≈ sbttotalamount ± 0.01 → both go to totaltax
+#      (interest33 = interestpaid × 3.3% WHT; validated against totaltax in H)
+#   3. interestb4t   → must equal interestb4t in H exactly
+#      (running interest balance before this transaction — direct 1:1)
+#
+# Known edge cases:
+#   - ADJ-* sysrefs are excluded from this rule (source_filter in common.yaml).
+#     They are validated separately in lnhisthloantransactionhistoryh_adj/def/def001.yaml
+#   - interest33 vs sbttotalamount differ by ≤ 0.01 due to rounding.
+#     tolerance: 0.01 in defaults handles this.
+# ============================================================
+
+def_id: def001
+target_scope: transaction_group
+
+actions:
+  # -------------------------------------------------------
+  # Step 1: interestpaid → creditinterestamount (credit row)
+  # H Row 1 carries creditinterestamount = interestpaid
+  # H Row 2 carries debitinterestamount  = interestpaid (same value, debit side)
+  # Check credit side: SUM(old.interestpaid) = SUM(new.creditinterestamount)
+  # -------------------------------------------------------
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_interestpaid: "SUM(old.interestpaid)"
+      val_credit_interest: "SUM(new.creditinterestamount)"
+    condition: "val_interestpaid == val_credit_interest"
+    error_message: >
+      interestpaid not correctly pivoted to creditinterestamount.
+      old.interestpaid={val_interestpaid}, new.creditinterestamount={val_credit_interest}.
+
+  # -------------------------------------------------------
+  # Step 2: interestpaid → debitinterestamount (debit row)
+  # SUM(new.debitinterestamount) should also equal |interestpaid|
+  # For normal transactions: debitinterestamount = interestpaid (positive)
+  # For ADJ transactions: debitinterestamount = abs(interestpaid) (sign-flipped) → will mismatch
+  # -------------------------------------------------------
+  - step: "2"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_interestpaid: "SUM(old.interestpaid)"
+      val_debit_interest: "SUM(new.debitinterestamount)"
+    condition: "val_interestpaid == val_debit_interest"
+    error_message: >
+      interestpaid not correctly pivoted to debitinterestamount.
+      old.interestpaid={val_interestpaid}, new.debitinterestamount={val_debit_interest}.
+
+  # -------------------------------------------------------
+  # Step 3: interest33 ≈ totaltax in H
+  # interest33 = interestpaid × 3.3% (withholding tax)
+  # sbttotalamount = sbtrevenue + sbtrevenueamount (SBT breakdown)
+  # Both converge to totaltax with ≤ 0.01 rounding difference
+  # -------------------------------------------------------
+  - step: "3"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_interest33: "SUM(old.interest33)"
+      val_totaltax: "SUM(new.totaltax)"
+    condition: "val_interest33 == val_totaltax"
+    error_message: >
+      interest33 does not match totaltax in H (beyond 0.01 tolerance).
+      old.interest33={val_interest33}, new.totaltax={val_totaltax}.
+      Possible SBT/WHT tax calculation error during migration.
+
+  # -------------------------------------------------------
+  # Step 4: interestb4t → interestb4t (direct balance check)
+  # Running interest balance before this transaction — must be identical
+  # -------------------------------------------------------
+  - step: "4"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old_ib4t: "SUM(old.interestb4t)"
+      val_new_ib4t: "SUM(new.interestb4t)"
+    condition: "val_old_ib4t == val_new_ib4t"
+    error_message: >
+      interestb4t balance mismatch.
+      old.interestb4t={val_old_ib4t}, new.interestb4t={val_new_ib4t}.
+      Running interest balance was not correctly carried over during migration.
+
+  # -------------------------------------------------------
+  # Step 5: Double-entry self-balance check
+  # For every normal transaction group, credit and debit interest must be equal
+  # (balanced ledger check — purely on new H table)
+  # -------------------------------------------------------
+  - step: "5"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_credit: "SUM(new.creditinterestamount)"
+      val_debit: "SUM(new.debitinterestamount)"
+    condition: "val_credit == val_debit"
+    error_message: >
+      H table interest ledger is unbalanced for this group.
+      SUM(creditinterestamount)={val_credit} != SUM(debitinterestamount)={val_debit}.
+      Unbalanced double-entry indicates missing or duplicate H row.
+
+  # -------------------------------------------------------
+  # Step 6: SBT tax self-check
+  # sbttotalamount must equal sbtrevenue + sbtrevenueamount (old side only)
+  # Catches calculation errors before migration even introduced them
+  # -------------------------------------------------------
+  - step: "6"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_sbttotal: "SUM(old.sbttotalamount)"
+      val_sbtparts: "SUM(old.sbtrevenue)"
+    condition: "val_sbttotal == val_sbtparts"
+    error_message: >
+      SBT tax inconsistency in source data.
+      old.sbttotalamount={val_sbttotal} does not match old.sbtrevenue={val_sbtparts}.
+      (sbttotalamount should equal sbtrevenue + sbtrevenueamount; using sbtrevenue as proxy)

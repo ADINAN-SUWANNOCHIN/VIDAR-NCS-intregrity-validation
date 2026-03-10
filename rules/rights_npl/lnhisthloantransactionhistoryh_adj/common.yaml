@@ -1,0 +1,139 @@
+# ============================================================
+# rights_npl / lnhisthloantransactionhistoryh_adj
+# MULTIPLE 2:1 — ADJ-* SYSREFS ONLY
+#   conv$vinplsbthistory  → ln$lnhisthloantransactionhistoryh
+#   conv$vinplhistory     → ln$lnhisthloantransactionhistoryh
+#
+# SCOPE: Adjustment transactions only (systemreferenceno LIKE 'ADJ-%')
+# Normal sysrefs are validated in: lnhisthloantransactionhistoryh/
+#
+# BUSINESS CONTEXT:
+#   ADJ sysrefs are created when a payment was recorded in the system AFTER
+#   the actual payment date (e.g. paid 12/03, entered 12/04). The system
+#   calculates interest up to entry date, then ADJ corrects it back to the
+#   real payment date. ADJ is a separate transaction with its own sysref.
+#
+# MIGRATION BEHAVIOR (different from normal sysrefs):
+#   - interestpaid is NEGATIVE in old (reversal amount)
+#   - H has only 1 row: debit row only (no credit row)
+#   - debitinterestamount = ABS(interestpaid) — sign is flipped positive
+#   - creditinterestamount = 0
+#
+# Column mappings are identical to normal rule.
+# Only def rules differ (see def/def001.yaml).
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinplsbthistory],[ncs-conv-aging].dbo.[conv$vinplhistory]"
+  target: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+  table_type: MULTIPLE
+  source_filter: "systemreferenceno LIKE 'ADJ-%'"
+
+anchor_key:
+  old: id
+  new: id
+
+transaction_grouping:
+  keys:
+    old: systemreferenceno
+    new: systemreferenceno
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+
+  exact_matches:
+
+    # --- SOURCE REGISTRATION: vinplsbthistory (PRIMARY) ---
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: accounttype
+      new: accounttype
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: currency
+      new: currency
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: systemreferenceno
+      new: systemreferenceno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: sbtratio
+      new: sbtratio
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: citratio
+      new: citratio
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # --- SOURCE REGISTRATION: vinplhistory (SECONDARY) ---
+    # Group key mismatch: vinplhistory uses systemreferencenumber (not systemreferenceno)
+    # → grouped as '' → 1 ROW_MISSING (same behavior as normal rule, documented acceptable)
+    - old: newaccountno
+      new: accountno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+  transformed_matches:
+
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: principleb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: interestb4t
+      new: interestb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: sbtrevenue
+      new: sbtamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: sbtrevenueamount
+      new: localtax
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    - old: sbttotalamount
+      new: totaltax
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+  # NOTE: split_matches (interestpaid → creditinterestamount) is intentionally
+  # OMITTED for ADJ. For ADJ sysrefs, creditinterestamount = 0 (debit-only row).
+  # The sign-flip pivot is validated in def/def001.yaml instead.

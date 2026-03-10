@@ -1,6 +1,6 @@
 name: Invest LV
 module: invest
-description: "LV investment tables (lv$ prefix). conv$vinpllvcithistory is routed to 4 new tables by invaccounttype (TX=6.6M→invtransactionhistoryh, TF=1159→fbo, TS=902→truesale, TF+TS=2061→fbo_truesale). conv$vinpllvhistory → lv$lvhisthsum (partial, P-prefix sysrefs only)."
+description: "LV investment tables (lv$ prefix). conv$vinpllvcithistory is routed to 4 new tables by invaccounttype (TX=6.6M→invtransactionhistoryh, TF=1159→fbo, TS=902→truesale, TF+TS=2061→fbo_truesale). conv$vinpllvhistory → lv$lvhisthsum (partial, P-prefix sysrefs only) + lv$lvhistinvtransactionhistory (all rows, detail)."
 
 cases:
   # ---------------------------------------------------------------
@@ -55,3 +55,15 @@ cases:
     rule_path: invest_lv/lvhisth_fbo_truesale
     tables:
       - "[ncs-conv-aging].dbo.[conv$vinpllvcithistory]"
+
+  # ---------------------------------------------------------------
+  # Case 6: TRANSACTION — detail transaction history
+  # conv$vinpllvhistory → lv$lvhistinvtransactionhistory
+  # All vinpllvhistory rows (no source_filter).
+  # Group key: systemreferenceno
+  # PENDING MANUAL_CHECK: newaccountno→lvaccountno, chargetype→expensecode
+  # ---------------------------------------------------------------
+  - name: lvhistinvtransactionhistory
+    rule_path: invest_lv/lvhistinvtransactionhistory
+    tables:
+      - "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"

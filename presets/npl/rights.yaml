@@ -10,3 +10,23 @@ cases:
     rule_path: rights_npl/lnhistloantransactionhistory
     tables:
       - "conv$vinplhistory"
+
+  # ---------------------------------------------------------------
+  # conv$vinplsbthistory + conv$vinplhistory → ln$lnhisthloantransactionhistoryh
+  # MULTIPLE 2:1 — normal sysrefs only (ADJ excluded by source_filter)
+  # ---------------------------------------------------------------
+  - name: lnhisthloantransactionhistoryh
+    rule_path: rights_npl/lnhisthloantransactionhistoryh
+    tables:
+      - "conv$vinplsbthistory"
+      - "conv$vinplhistory"
+
+  # ---------------------------------------------------------------
+  # conv$vinplsbthistory → ln$lnhisthloantransactionhistoryh
+  # MULTIPLE 2:1 — ADJ-* sysrefs only (sign-flip validation)
+  # ---------------------------------------------------------------
+  - name: lnhisthloantransactionhistoryh_adj
+    rule_path: rights_npl/lnhisthloantransactionhistoryh_adj
+    tables:
+      - "conv$vinplsbthistory"
+      - "conv$vinplhistory"
