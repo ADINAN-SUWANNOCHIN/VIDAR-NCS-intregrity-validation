@@ -1,0 +1,78 @@
+# ============================================================
+# def001 — ADJ Sysref Pivot Integrity Check
+# Scope: rights_npl / lnhisthloantransactionhistoryh_adj
+#
+# Validates that ADJ-* adjustment transactions were correctly
+# migrated into ln$lnhisthloantransactionhistoryh.
+#
+# ADJ migration rules (different from normal sysrefs):
+#   - interestpaid in old is NEGATIVE (reversal)
+#   - H has 1 row only: debit row (no credit row)
+#   - debitinterestamount = ABS(interestpaid) — sign flipped to positive
+#   - creditinterestamount = 0
+#   - interest33 ≈ totaltax ± 0.01 (same rule as normal, signs may vary)
+#   - interestb4t → interestb4t direct 1:1 (same as normal)
+# ============================================================
+
+def_id: def001
+target_scope: transaction_group
+
+actions:
+  # -------------------------------------------------------
+  # Step 1: Sign-flip check — debitinterestamount = ABS(interestpaid)
+  # interestpaid is negative for ADJ; debit is stored as positive
+  # Check: SUM(old.interestpaid) + SUM(new.debitinterestamount) == 0
+  # (they cancel each other: -X + X = 0)
+  # -------------------------------------------------------
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_interestpaid: "SUM(old.interestpaid)"
+      val_debit: "SUM(new.debitinterestamount)"
+    condition: "val_interestpaid + val_debit == 0"
+    error_message: >
+      ADJ sign-flip not correctly applied to debitinterestamount.
+      old.interestpaid={val_interestpaid} (negative expected), new.debitinterestamount={val_debit} (positive expected).
+      Expected: interestpaid + debitinterestamount == 0.
+
+  # -------------------------------------------------------
+  # Step 2: No credit row — creditinterestamount must be 0
+  # ADJ produces debit-only H row; credit side must be absent
+  # -------------------------------------------------------
+  - step: "2"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_credit: "SUM(new.creditinterestamount)"
+    condition: "val_credit == 0"
+    error_message: >
+      ADJ sysref has unexpected creditinterestamount.
+      new.creditinterestamount={val_credit}, expected 0.
+      ADJ transactions should produce a debit-only H row (no credit entry).
+
+  # -------------------------------------------------------
+  # Step 3: interest33 ≈ totaltax in H (same as normal rule)
+  # Even for ADJ, WHT tax should be correctly carried over
+  # -------------------------------------------------------
+  - step: "3"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_interest33: "SUM(old.interest33)"
+      val_totaltax: "SUM(new.totaltax)"
+    condition: "val_interest33 == val_totaltax"
+    error_message: >
+      interest33 does not match totaltax for ADJ sysref (beyond 0.01 tolerance).
+      old.interest33={val_interest33}, new.totaltax={val_totaltax}.
+
+  # -------------------------------------------------------
+  # Step 4: interestb4t → interestb4t direct match
+  # Running interest balance before transaction — same rule as normal
+  # -------------------------------------------------------
+  - step: "4"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old_ib4t: "SUM(old.interestb4t)"
+      val_new_ib4t: "SUM(new.interestb4t)"
+    condition: "val_old_ib4t == val_new_ib4t"
+    error_message: >
+      interestb4t balance mismatch for ADJ sysref.
+      old.interestb4t={val_old_ib4t}, new.interestb4t={val_new_ib4t}.

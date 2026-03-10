@@ -1,16 +1,11 @@
 # ============================================================
-# Test Case 2: TRANSACTION (1 OLD → 1 NEW)
-# conv$vinplhistory → ln$lnhistloantransactionhistory
+# rights_npl / lnhistloantransactionhistory
+# TRANSACTION: conv$vinplhistory → ln$lnhistloantransactionhistory
 #
-# ~15.9M rows — stream by transaction group (systemreferencenumber)
-#
-# Column notes (from real data inspection of ln$lnhistloantransactionhistory):
-#   - billno:           old="P-BAM-640205-1304" style, new same — exact match ✓
-#   - planno:           NOT present in ln$lnhistloantransactionhistory (skip)
-#   - interestrate:     old=".0525" nvarchar, new=0.0525 decimal — parseFloat handles it
-#   - noofdays:         old=nvarchar, new=int — exact match if values are numeric strings
-#   - startinterestdate/endinterestdate: old=ISO datetime string, new=datetime2
-#   - repayviatdr:      bit column present in both (ln$lnhist only)
+# Verified against:
+#   - 4COMMON4.xlsx (mapping report)
+#   - 1000-row CSV samples (correct_data/4/)
+#   - Live DB queries on 172.18.1.153
 # ============================================================
 
 table_info:
@@ -18,16 +13,10 @@ table_info:
   target: "[ncs-npl-aging].dbo.[ln$lnhistloantransactionhistory]"
   table_type: TRANSACTION
 
-# anchor_key: used ONLY for keyset pagination ordering (must be unique+monotonic per row).
-# id is auto-increment → safe keyset cursor. IDs are NOT preserved through migration,
-# but that is no longer an issue — TransactionStrategy now fetches new rows by
-# tg.keys.new (systemreferenceno), not by anchor_key.new.
-# anchor_key.new is a required schema field but unused for fetching in group-mode.
 anchor_key:
   old: id
   new: id
 
-# Group comparison by transaction reference number
 transaction_grouping:
   keys:
     old: systemreferencenumber
@@ -39,14 +28,21 @@ defaults:
 schema_mappings:
 
   exact_matches:
+
+    # --- ACCOUNT ---
     - old: newaccountno
       new: accountno
+    # PLACEHOLDER: accountno (old) → no match in new
+    #   old.accountno is the old-format account string (e.g. '0155001966700')
+    #   new.accountno = migrated numeric ID → different value, skip
 
-    - old: auxilarytransactioncode
-      new: auxilarytranscode          # column renamed (shortened)
+    # --- TRANSACTION CODES ---
+    - old: loantransactioncode
+      new: loantranshostcode
+    # PLACEHOLDER: loantransactionhistorycode (new-only, always empty in sample — no old source)
 
-    - old: loantransaction
-      new: loantranshostcode          # column renamed
+    - old: auxilarytransaction
+      new: auxilarytranscode
 
     - old: affectcode
       new: affectcode
@@ -54,27 +50,32 @@ schema_mappings:
     - old: debitcredit
       new: debitcredit
 
+    - old: chargetypecode
+      new: expensecode
+    # PLACEHOLDER: docnoexpense (old) → MISSING in new (expenseseqno always 0 in new)
+    #   Old has 89,188 non-zero rows. Confirmed not migrated → FLAG AS MISSING
+
+    # --- TRANSACTION REFERENCE ---
+    - old: systemreferencenumber
+      new: systemreferenceno
+    # PLACEHOLDER: orgsystemreferencenumber (old) → EMPTY in old, skip
+
+    # --- RECEIPT ---
+    # Verified: 1,864,287 non-empty rows on both sides — exact match
+    - old: receiptnumber
+      new: receiptno
+
+    # --- PEOPLE / BRANCH ---
     - old: tellerid
       new: tellerid
 
-    - old: systemreferencenumber
-      new: systemreferenceno          # renamed
-
-    - old: receiptnumber
-      new: receiptno                  # renamed
+    - old: servicebranch
+      new: servicebranch
 
     - old: inputsourcesystem
-      new: channel                    # renamed
+      new: channel
 
-    - old: currentbalanceb4t
-      new: currentbalanceb4t
-
-    - old: interestb4t
-      new: interestb4t
-
-    - old: penaltyamountb4t
-      new: penaltyamountb4t
-
+    # --- FLAGS ---
     - old: lgo1flagb4law
       new: lgo1flagb4law
 
@@ -84,31 +85,127 @@ schema_mappings:
     - old: lgo2flag
       new: lgo2flag
 
+    # Use pre-converted bit column (_affectnextpaymentflag), not raw affectnextpaymentdate (nvarchar N/Y)
+    # Verified: False = False
+    - old: _affectnextpaymentflag
+      new: affectnextpaymentflag
+    # PLACEHOLDER: affectnextpaymentdate (old) → raw N/Y source of _affectnextpaymentflag, skip
+
+    # --- DOCUMENT ---
     - old: doctype
       new: doctype
-
-    - old: remark
-      new: remark
 
     - old: billno
       new: billno
 
+    - old: tempid
+      new: tempid
+
+    - old: runningno
+      new: runningno
+
     - old: fixfloat
       new: fixfloat
 
-    - old: noofdays
-      new: noofdays
-
-    - old: repayviatdr
-      new: repayviatdr
+    - old: remark
+      new: remark
 
     - old: receivetxnid
       new: receivetxnid
 
-    - old: tempid
-      new: tempid
+    # --- RATE ---
+    - old: ratevariancecode
+      new: variancecode
 
-    # NOTE: planno is excluded — not present in ln$lnhistloantransactionhistory
+    # --- MIGRATION TRACKING (all always=1 in old, not business data) ---
+    # PLACEHOLDER: success (old bit) → active (new bit) — always 1, migration flag, skip
+    # PLACEHOLDER: successlv2 (old bit) → no match — always 1, migration flag, skip
+    # PLACEHOLDER: usagebylv2 (old bit) → updateby (new nvarchar) — different semantics, skip
+    # PLACEHOLDER: conversionstatus (old nvarchar) → always '1', migration flag, skip
+
+    # --- STAGING / ETL COLUMNS (not business data) ---
+    # PLACEHOLDER: line (old bigint) → internal migration sequence, skip
+    # PLACEHOLDER: content (old nvarchar) → raw pipe-delimited concat of all fields, skip
+    # PLACEHOLDER: _effectivedate (old datetime2) → ETL staging col, skip
+    # PLACEHOLDER: _transactiondate (old datetime2) → ETL staging col, skip
+    # PLACEHOLDER: keydate (old nvarchar) → ETL staging col, skip
+    # PLACEHOLDER: _keydate (old datetime2) → ETL staging col, skip
+
+    # --- NEW-SYSTEM COLUMNS (no old source, populated post-migration) ---
+    # PLACEHOLDER: accounttype → new system field
+    # PLACEHOLDER: bank → new system field
+    # PLACEHOLDER: branch → new system field
+    # PLACEHOLDER: accountbranch → new system field
+    # PLACEHOLDER: reversal → new system field
+    # PLACEHOLDER: transactonseq → new system field
+    # PLACEHOLDER: orderno → new system field
+    # PLACEHOLDER: journalseqno → new system field
+    # PLACEHOLDER: originaljournalseqno → new system field
+    # PLACEHOLDER: reversaljournalseqno → new system field
+    # PLACEHOLDER: currency → new system field
+    # PLACEHOLDER: gleventcode → new system field
+    # PLACEHOLDER: glgroupcode → new system field
+    # PLACEHOLDER: costcenter → new system field
+    # PLACEHOLDER: nextpaymentduedateb4t → new computed field
+    # PLACEHOLDER: paymentamountb4t → new computed field
+    # PLACEHOLDER: partialamountb4t → new computed field
+    # PLACEHOLDER: paymentcodeb4t → new computed field
+    # PLACEHOLDER: suspensetaxb4t → new computed field
+    # PLACEHOLDER: suspensenontaxb4t → new computed field
+    # PLACEHOLDER: deferedinteresttaxb4t → new computed field
+    # PLACEHOLDER: deferedinterestnontaxb4t → new computed field
+    # PLACEHOLDER: interestb4restb4t → new computed field
+    # PLACEHOLDER: miscchargeb4t → new computed field
+    # PLACEHOLDER: otherchargeb4t → new computed field
+    # PLACEHOLDER: createby → new audit field
+    # PLACEHOLDER: updateby → new audit field
+    # PLACEHOLDER: updatedate → new audit field
+    # PLACEHOLDER: chargeamountid → new system field
+    # PLACEHOLDER: billingduedate → new system field
+    # PLACEHOLDER: microflowname → new system field
+    # PLACEHOLDER: programname → new system field
+    # PLACEHOLDER: fromdate → new system field
+    # PLACEHOLDER: todate → new system field
+    # PLACEHOLDER: principalbalance → new computed field
+    # PLACEHOLDER: documentno → new system field
+    # PLACEHOLDER: billprinciple → new computed field
+    # PLACEHOLDER: billinterest → new computed field
+    # PLACEHOLDER: billdefered → new computed field
+    # PLACEHOLDER: billinterestb4rest → new computed field
+    # PLACEHOLDER: billmiscd → new computed field
+    # PLACEHOLDER: billothercharge → new computed field
+    # PLACEHOLDER: billpenalty → new computed field
+    # PLACEHOLDER: transactionamountdec → new decimal copy of transactionamount
+    # PLACEHOLDER: rateno → EMPTY in new (0 non-empty rows confirmed), skip
+    # PLACEHOLDER: workflowpaymenttype → new system field
+    # PLACEHOLDER: createddate → new audit field
+    # PLACEHOLDER: changeddate → new audit field
+    # PLACEHOLDER: submetaobjectname → new system field
+    # PLACEHOLDER: system$owner → new system field
+    # PLACEHOLDER: system$changedby → new system field
+    # PLACEHOLDER: assetno → new system field
+    # PLACEHOLDER: approvaluserid → new system field
+    # PLACEHOLDER: glmmyyyy → new system field
+    # PLACEHOLDER: minimumrate → new system field
+    # PLACEHOLDER: maximumrate → new system field
+    # PLACEHOLDER: ratedescription → new system field
+    # PLACEHOLDER: originaltransactionamount → new system field
+    # PLACEHOLDER: ratiopayment → new system field (old conversionstatus='1' ≠ new ratiopayment=0.0)
+    # PLACEHOLDER: originalpaymentamount → new system field
+    # PLACEHOLDER: latechargebillno → new system field
+    # PLACEHOLDER: adjustmentflag → new system field
+    # PLACEHOLDER: lastcalintdateb4 → new system field
+
+    # !! MIGRATION GAP — REQUIRES BUSINESS REVIEW !!
+    # PLACEHOLDER: repayviatdr
+    #   OLD: nvarchar 'N'=11,622,784 rows | 'Y'=3,029,456 rows | ''=1,315,358 rows
+    #   NEW: bit — ALL 15,967,598 rows = False (0)
+    #   VERDICT: repayviatdr was NOT migrated. Old 'Y' values were lost.
+    #   ACTION: Confirm with business whether this field should have been migrated.
+    #           If yes → report as migration defect.
+
+    # PLACEHOLDER: severity (old) → EMPTY in old (confirmed), skip
+    # PLACEHOLDER: createdate (old datetime2) → EMPTY in old (always NULL confirmed), skip
 
   transformed_matches:
     # Amount columns: old = nvarchar, new = decimal
@@ -120,8 +217,23 @@ schema_mappings:
       new: paymentamount
       transform_rule: NONE
 
-    # Date columns: old = "2021-02-05T00:00:00.000+07:00" ISO string, new = datetime2
-    # DATE_TO_DATETIME normalizes to YYYY-MM-DD for comparison
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+
+    - old: interestb4t
+      new: interestb4t
+      transform_rule: NONE
+
+    - old: penaltyamountb4t
+      new: penaltyamountb4t
+      transform_rule: NONE
+
+    - old: installment
+      new: installmentamount
+      transform_rule: NONE
+
+    # Date columns: old = ISO string "2024-01-01T00:00:00.000+07:00", new = datetime2
     - old: transactiondate
       new: transactiondate
       transform_rule: DATE_TO_DATETIME
@@ -146,8 +258,25 @@ schema_mappings:
       new: endinterestdate
       transform_rule: DATE_TO_DATETIME
 
-    # Interest rate: old = ".0525" (leading dot, nvarchar), new = 0.0525 (decimal)
-    # parseFloat(".0525") = 0.0525 — isEqual handles the comparison correctly
+    # createdate: old is always NULL (ETL didn't populate it).
+    # New createdate = conversion timestamp set by migration process.
+    # Not a strict data check — just document that it exists in new.
+    # PLACEHOLDER: createdate → included for awareness, not validated
+    #   old createdate (datetime2) = always NULL
+    #   new createdate (datetime2) = migration timestamp (e.g. 2023-12-31 17:03:00)
+
+    # Interest rate: old = ".0525" (nvarchar, leading dot), new = decimal 0.0525
     - old: interestrate
       new: interestrate
+      transform_rule: STRIP_LEADING_ZEROS
+
+    # Rate variance amount: old = ".0001" (nvarchar), new = decimal
+    # Confirmed has data: 579,695 non-zero rows in new
+    - old: ratevariance
+      new: varianceamount
+      transform_rule: STRIP_LEADING_ZEROS
+
+    # Calculate interest rate: old = ".0525" (nvarchar), new = decimal
+    - old: calculaterate
+      new: calculateintrate
       transform_rule: STRIP_LEADING_ZEROS

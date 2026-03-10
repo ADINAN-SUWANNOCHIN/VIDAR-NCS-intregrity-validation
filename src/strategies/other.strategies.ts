@@ -596,7 +596,15 @@ export class MultipleStrategy extends BaseStrategy {
       for (const pair of pairMap.values()) {
         const { srcTable, tgtTable, exact, transformed, concat, split, formula } = pair;
 
-        this.logger.log(`[MULTIPLE:GROUP] Processing ${srcTable} → ${tgtTable} (grouped by [${oldKeyCol}])`);
+        // Per-source group key: use source_key_aliases if defined for this source,
+        // otherwise fall back to tg.keys.old (the shared default).
+        const srcKeyCol = tg.source_key_aliases?.[srcTable] ?? oldKeyCol;
+
+        // Apply source_filter only to the primary (default) source.
+        // Secondary sources may have different column names that would cause a SQL error.
+        const srcFilter = srcTable === defaultSrc ? commonRule.table_info.source_filter : undefined;
+
+        this.logger.log(`[MULTIPLE:GROUP] Processing ${srcTable} → ${tgtTable} (grouped by [${srcKeyCol}])`);
 
         // Noisy column detection
         const allOldCols = [
@@ -620,11 +628,11 @@ export class MultipleStrategy extends BaseStrategy {
         let carryNew = new Map<string, Record<string, unknown>[]>();
 
         while (true) {
-          const oldChunk = await this.db.fetchChunk(srcTable, anchorKeyOld, chunkSize, lastKey);
+          const oldChunk = await this.db.fetchChunk(srcTable, anchorKeyOld, chunkSize, lastKey, srcFilter);
           if (oldChunk.length === 0) break;
 
           // Collect unique group key values to fetch corresponding target rows
-          const groupKeyVals = [...new Set(oldChunk.map((r) => String(r[oldKeyCol] ?? '').trim()))];
+          const groupKeyVals = [...new Set(oldChunk.map((r) => String(r[srcKeyCol] ?? '').trim()))];
 
           // Fetch target rows by GROUP KEY (not by anchor key — old id has no match in new)
           const newRows: Record<string, unknown>[] = [];
@@ -637,7 +645,7 @@ export class MultipleStrategy extends BaseStrategy {
           carryNew = new Map();
 
           for (const row of oldChunk) {
-            const key = String(row[oldKeyCol] ?? '').trim();
+            const key = String(row[srcKeyCol] ?? '').trim();
             if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
             oldGroupMap.get(key)!.push(row);
             rowsChecked++;

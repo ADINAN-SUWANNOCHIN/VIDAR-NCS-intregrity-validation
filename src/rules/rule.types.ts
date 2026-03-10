@@ -86,6 +86,11 @@ export interface SchemaMappings {
 export interface TransactionGrouping {
   keys: { old: string; new: string };
   transform_key?: TransformRule;
+  // Per-source group key overrides for MULTIPLE strategy.
+  // Key = full source table reference, value = column name in that source.
+  // Falls back to keys.old if a source is not listed here.
+  // Use when different sources call the shared group key by different column names.
+  source_key_aliases?: Record<string, string>;
 }
 
 /**
