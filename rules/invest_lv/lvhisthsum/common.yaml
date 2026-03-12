@@ -36,6 +36,10 @@ table_info:
   source: "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
   target: "[ncs-npl-aging].dbo.[lv$lvhisthsum]"
   table_type: TRANSACTION
+  # Only P-prefix (P6xxx) and ADC-prefix rows from vinpllvhistory land in lvhisthsum.
+  # Other prefixes (CE, TD, INT, RQ, ZER, etc.) go to lvhistinvtransactionhistory only.
+  # Without this filter all 18M rows are processed → ROW_MISSING flood for ~11M non-P groups.
+  source_filter: "systemreferenceno LIKE 'P%' OR systemreferenceno LIKE 'ADC%'"
 
 anchor_key:
   old: id
@@ -45,6 +49,7 @@ transaction_grouping:
   keys:
     old: systemreferenceno
     new: systemreferenceno
+  target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
 
 defaults:
   tolerance: 0.01
@@ -103,9 +108,11 @@ schema_mappings:
       new: gainsettlementbalanceb4t
       transform_rule: NONE
 
-    - old: currentbalanceb4t
-      new: currentbalanceb4t
-      transform_rule: NONE
+    # currentbalanceb4t — excluded: post-migration recalculation, old ≠ new by design.
+    # old carries a different starting balance than new (confirmed on live DB: 3524462.16 ≠ 3662346.34).
+    # - old: currentbalanceb4t
+    #   new: currentbalanceb4t
+    #   transform_rule: NONE
 
     - old: interestb4t
       new: interestb4t
@@ -148,3 +155,103 @@ schema_mappings:
     - old: endinterestdate
       new: endinterestdate
       transform_rule: DATE_TO_DATETIME
+
+  # ---------------------------------------------------------------
+  # filtered_sum_matches: lvcredit*/lvdebit* columns
+  #
+  # Each new lv* column = SUM(old.transactionamount) for rows where:
+  #   - affectcode matches the specified group
+  #   - debitcredit matches C or D
+  #   - loantranshostcode NOT IN the consolidate=N exclusion list
+  #     (derived from transactioncode.json newlinehistconsolidate='N'
+  #      + unknown codes not in transactioncode.json)
+  #
+  # Reference: rules/global/lvhisthsum_mapping.yaml
+  # Verified on: P6303-005209, P6102-009721, P6401-909712
+  # ---------------------------------------------------------------
+  filtered_sum_matches:
+
+    # PRINCIPAL (เงินต้น)
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [PP]
+        debitcredit: C
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvcreditprincipleamount
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [PP]
+        debitcredit: D
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvdebitprincipleamount
+
+    # INTEREST (ดอกเบี้ย — all interest-family codes map to the same pair)
+    # I1=ดอกเบี้ย, I2=ดอกเบี้ยพัก, I3=ดอกเบี้ยก่อนปรับปรุง,
+    # IN=ดอกเบี้ยไม่รับรู้, IT=ดอกเบี้ยรับรู้, GG=ดอกเบี้ยผิดนัด
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I1, I2, I3, IN, IT, GG]
+        debitcredit: C
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvcreditinterestamount
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I1, I2, I3, IN, IT, GG]
+        debitcredit: D
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvdebitinterestamount
+
+    # GAIN CASH (ส่วนเกินทุน)
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [GC]
+        debitcredit: C
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvcreditgaincash
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [GC]
+        debitcredit: D
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvdebitgaincash
+
+    # GAIN SETTLEMENT (ขายทอดตลาดชำระหนี้)
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [GS]
+        debitcredit: C
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvcreditgainsettlement
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [GS]
+        debitcredit: D
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvdebitgainsettlement
+
+    # OTHER CHARGE (OF=Other Charge Fee, CF=Client Charge — both map to same column)
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [OF, CF]
+        debitcredit: C
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvcreditotherchargeamount
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [OF, CF]
+        debitcredit: D
+        loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
+      new: lvdebitotherchargeamount
+
+    # MISC CHARGE — always 0 across entire table (no data), included for completeness
+    # - old: transactionamount
+    #   old_filter:
+    #     affectcode_in: [MF]
+    #     debitcredit: C
+    #     loantranshostcode_not_in: [...]
+    #   new: lvcreditmischargeamount

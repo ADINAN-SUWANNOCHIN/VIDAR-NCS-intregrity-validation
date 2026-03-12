@@ -592,6 +592,26 @@ export class MultipleStrategy extends BaseStrategy {
     if (tg) {
       const oldKeyCol = tg.keys.old;
       const newKeyCol = tg.keys.new;
+      // target_fetch_key: use an indexed column for the WHERE IN query on the target side.
+      // Verified equal to keys.new on all tables (journalseqno = systemreferenceno, 100% match).
+      const targetFetchKey = tg.target_fetch_key ?? newKeyCol;
+
+      // Schema check per pair — mirrors TransactionStrategy (Issue #1).
+      // Without this, missing columns produce silent null comparisons, not COLUMN_MISSING errors.
+      for (const pair of pairMap.values()) {
+        const pairColErrors = await this.checkMissingColumns(pair.srcTable, pair.tgtTable, [
+          ...(pair.exact ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+          ...(pair.transformed ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+          ...(pair.concat ?? []).map((m) => ({ oldCols: m.old_cols ?? [], newCols: [m.new] })),
+        ]);
+        if (pairColErrors.length > 0) {
+          errors.push(...pairColErrors);
+          this.logger.warn(
+            `[MULTIPLE:GROUP] ${pairColErrors.length} column(s) missing in ` +
+            `${pair.srcTable} → ${pair.tgtTable} — those mappings will be silently skipped`,
+          );
+        }
+      }
 
       for (const pair of pairMap.values()) {
         const { srcTable, tgtTable, exact, transformed, concat, split, formula } = pair;
@@ -636,7 +656,7 @@ export class MultipleStrategy extends BaseStrategy {
 
           // Fetch target rows by GROUP KEY (not by anchor key — old id has no match in new)
           const newRows: Record<string, unknown>[] = [];
-          await this.db.streamRowsByKeys(tgtTable, newKeyCol, groupKeyVals, (row) => newRows.push(row));
+          await this.db.streamRowsByKeys(tgtTable, targetFetchKey, groupKeyVals, (row) => newRows.push(row));
 
           // Seed group maps with carry-over from previous chunk
           const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);

@@ -101,6 +101,9 @@ export abstract class BaseStrategy {
       formula_matches: (sm.formula_matches ?? []).filter(
         (m) => !m.old_cols.some((c) => missingOld.has(c)) && !missingNew.has(m.new),
       ),
+      filtered_sum_matches: (sm.filtered_sum_matches ?? []).filter(
+        (m) => !missingOld.has(m.old) && !missingNew.has(m.new),
+      ),
       // L3: filter pivot_matches the same way as other mapping types.
       pivot_matches: (sm.pivot_matches ?? []).filter(
         (m) => !missingOld.has(m.value_col) && !missingNew.has(m.new_col),
@@ -227,6 +230,7 @@ export abstract class BaseStrategy {
       ...(sm.transformed_matches ?? []).map((m) => m.old),
       ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
       ...(sm.formula_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.filtered_sum_matches ?? []).map((m) => m.old),
       ...(sm.pivot_matches ?? []).map((m) => m.value_col),
     ]);
 
@@ -236,6 +240,7 @@ export abstract class BaseStrategy {
       ...(sm.transformed_matches ?? []).map((m) => m.new),
       ...(sm.concat_matches ?? []).map((m) => m.new),
       ...(sm.formula_matches ?? []).map((m) => m.new),
+      ...(sm.filtered_sum_matches ?? []).map((m) => m.new),
       ...(sm.pivot_matches ?? []).map((m) => m.new_col),
     ]);
 

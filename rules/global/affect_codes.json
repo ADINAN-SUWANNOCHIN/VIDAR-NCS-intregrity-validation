@@ -39,6 +39,9 @@
     { "code": "Q7", "description": "TXCalIntFBO", "category": "TAX_CALCULATION" },
     { "code": "B1", "description": "Balance Forward Accrue Int", "category": "BALANCE_FWD_ACCRUE" },
     { "code": "B2", "description": "Balance Forward Defer Int", "category": "BALANCE_FWD_DEFER" },
-    { "code": "B3", "description": "Balance Forward Penalty", "category": "BALANCE_FWD_PENALTY" }
+    { "code": "B3", "description": "Balance Forward Penalty", "category": "BALANCE_FWD_PENALTY" },
+    { "code": "PC", "description": "NPA Cost Principle", "category": "PRINCIPAL_NPA_COST" },
+    { "code": "PG", "description": "Unearned Profit (UnearnProfit)", "category": "PRINCIPAL_UNEARNED_PROFIT" },
+    { "code": "QI", "description": "Interest INQ", "category": "INTEREST_INQ" }
   ]
 }

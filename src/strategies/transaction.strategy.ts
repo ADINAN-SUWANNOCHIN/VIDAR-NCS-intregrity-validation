@@ -44,6 +44,9 @@ export class TransactionStrategy extends BaseStrategy {
 
     const oldKeyCol = tg.keys.old;
     const newKeyCol = tg.keys.new;
+    // target_fetch_key: use an indexed column (e.g. journalseqno) for the WHERE IN query
+    // instead of keys.new when keys.new has no index. Verified equal to keys.new on all tables.
+    const targetFetchKey = tg.target_fetch_key ?? newKeyCol;
 
     this.logger.log(`[TXN] Validating ${source} → ${target} grouped by [${oldKeyCol}]`);
 
@@ -54,6 +57,7 @@ export class TransactionStrategy extends BaseStrategy {
       ...(sm.transformed_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
       ...(sm.concat_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
       ...(sm.formula_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
+      ...(sm.filtered_sum_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
     ]);
     if (colErrors.length > 0) {
       errors.push(...colErrors);
@@ -70,6 +74,7 @@ export class TransactionStrategy extends BaseStrategy {
       ...(sm.split_matches ?? []).map((m) => m.old),
       ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
       ...(sm.formula_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.filtered_sum_matches ?? []).map((m) => m.old),
     ];
     const noisyMap = await this.detectNoisyColumns(source, allOldCols);
     for (const [col, type] of noisyMap) {
@@ -129,7 +134,7 @@ export class TransactionStrategy extends BaseStrategy {
       ].filter((k) => k !== '' && !newGroupMap.has(k));
 
       const newRows: Record<string, unknown>[] = [];
-      await this.db.streamRowsByKeys(target, newKeyCol, groupKeyVals, (row) => newRows.push(row));
+      await this.db.streamRowsByKeys(target, targetFetchKey, groupKeyVals, (row) => newRows.push(row));
 
       for (const row of oldChunk) {
         const key = this.normalizeKey(row[oldKeyCol], tg.transform_key);
@@ -325,6 +330,36 @@ export class TransactionStrategy extends BaseStrategy {
           newValue: newTotal,
           groupKey,
           message: `Formula mismatch [${mapping.formula}(${mapping.old_cols.join(',')})→${mapping.new}]: ${oldComputed} ≠ ${newTotal} (group: ${groupKey})`,
+        });
+      }
+    }
+
+    // filtered_sum_matches: SUM(old.col WHERE filter conditions) must equal new.col
+    // Used for lv$lvhisthsum lvcredit*/lvdebit* columns derived by affectcode+debitcredit grouping.
+    for (const mapping of sm.filtered_sum_matches ?? []) {
+      if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
+      const f = mapping.old_filter;
+      const filteredOld = oldGroup.filter((row) => {
+        if (f.affectcode_in?.length && !f.affectcode_in.includes(String(row['affectcode'] ?? ''))) return false;
+        if (f.debitcredit && String(row['debitcredit'] ?? '') !== f.debitcredit) return false;
+        if (f.loantranshostcode_not_in?.includes(String(row['loantranshostcode'] ?? ''))) return false;
+        return true;
+      });
+      const oldSum = this.sumColumn(filteredOld, mapping.old) ?? 0;
+      const newTotal = this.sumColumn(newGroup, mapping.new) ?? 0;
+      if (Math.abs(oldSum - newTotal) > tolerance) {
+        const filterDesc = [
+          f.affectcode_in?.length ? `affectcode∈[${f.affectcode_in.join(',')}]` : '',
+          f.debitcredit ? `dc=${f.debitcredit}` : '',
+        ].filter(Boolean).join(',');
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: `${mapping.old}[${filterDesc}]`,
+          newColumn: mapping.new,
+          oldValue: oldSum,
+          newValue: newTotal,
+          groupKey,
+          message: `Filtered sum mismatch [${mapping.old}(${filterDesc})→${mapping.new}]: ${oldSum} ≠ ${newTotal} (group: ${groupKey})`,
         });
       }
     }

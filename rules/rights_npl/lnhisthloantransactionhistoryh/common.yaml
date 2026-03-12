@@ -55,6 +55,7 @@ transaction_grouping:
   keys:
     old: systemreferenceno
     new: systemreferenceno
+  target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
   source_key_aliases:
     "[ncs-conv-aging].dbo.[conv$vinplhistory]": systemreferencenumber
 
@@ -236,8 +237,8 @@ schema_mappings:
     #   H Row 2 (debit entry):  debitinterestamount  = interestpaid
     #   SUM(old.interestpaid per group) = SUM(new.creditinterestamount per group) ✓
     #   ADJ-* sysrefs excluded by source_filter — no exception needed here
-    - old_cols: [interestpaid]
+    # NOTE: split_matches always routes to the default pair (src_table/tgt_table ignored here).
+    # Field names must match SplitMatch TypeScript type: old (string) + new_cols (array).
+    - old: interestpaid
       formula: SUM
-      new: creditinterestamount
-      src_table: "[ncs-conv-aging].dbo.[conv$vinplsbthistory]"
-      tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+      new_cols: [creditinterestamount]

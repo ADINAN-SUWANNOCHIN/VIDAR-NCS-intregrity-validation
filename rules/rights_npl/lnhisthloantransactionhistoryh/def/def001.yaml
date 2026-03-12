@@ -112,10 +112,11 @@ actions:
   - step: "6"
     check_type: ROW_LEVEL_COHESION
     variables:
-      val_sbttotal: "SUM(old.sbttotalamount)"
-      val_sbtparts: "SUM(old.sbtrevenue)"
-    condition: "val_sbttotal == val_sbtparts"
+      val_sbttotal:  "SUM(old.sbttotalamount)"
+      val_sbtrev:    "SUM(old.sbtrevenue)"
+      val_sbtrevamt: "SUM(old.sbtrevenueamount)"
+    condition: "val_sbttotal == val_sbtrev + val_sbtrevamt"
     error_message: >
       SBT tax inconsistency in source data.
-      old.sbttotalamount={val_sbttotal} does not match old.sbtrevenue={val_sbtparts}.
-      (sbttotalamount should equal sbtrevenue + sbtrevenueamount; using sbtrevenue as proxy)
+      old.sbttotalamount={val_sbttotal} != old.sbtrevenue({val_sbtrev}) + old.sbtrevenueamount({val_sbtrevamt}).
+      Possible SBT tax calculation error in the source system.
