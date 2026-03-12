@@ -303,6 +303,79 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return result.recordset as Record<string, unknown>[];
   }
 
+  /**
+   * Paginate through DISTINCT values of a key column.
+   * Supports an optional SQL filter clause (appended with AND).
+   * Used by composite-key validation to iterate sysrefs page by page.
+   */
+  async getDistinctKeys(
+    table: string,
+    keyColumn: string,
+    batchSize: number,
+    lastKey: string | null,
+    filter?: string,
+  ): Promise<string[]> {
+    const request = this.pool.request();
+    request.input('batchSize', sql.Int, batchSize);
+
+    const filterClause = filter ? `AND (${filter})` : '';
+    const whereClause =
+      lastKey === null
+        ? `WHERE [${keyColumn}] IS NOT NULL ${filterClause}`
+        : `WHERE [${keyColumn}] > @lastKey ${filterClause}`;
+
+    if (lastKey !== null) {
+      request.input('lastKey', sql.NVarChar, lastKey);
+    }
+
+    const result = await request.query(`
+      SELECT DISTINCT [${keyColumn}]
+      FROM ${tableRef(table)} WITH (NOLOCK)
+      ${whereClause}
+      ORDER BY [${keyColumn}]
+      OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY
+    `);
+    return result.recordset.map((r) => String(r[keyColumn]));
+  }
+
+  /**
+   * Batch lookup: given a list of lookup values, return a Map of lookupValue → resultValue.
+   * Fetches from a translation table (e.g. cithistory: invaccountno → newinvaccountno).
+   * Handles >2000 values by batching (SQL Server param limit = 2100).
+   * Uses DISTINCT so duplicate invaccountnos return one canonical mapping per value.
+   */
+  async batchLookup(
+    table: string,
+    lookupCol: string,
+    resultCol: string,
+    values: string[],
+  ): Promise<Map<string, string>> {
+    const map = new Map<string, string>();
+    if (values.length === 0) return map;
+
+    const BATCH_SIZE = 2000;
+    for (let i = 0; i < values.length; i += BATCH_SIZE) {
+      const batch = values.slice(i, i + BATCH_SIZE);
+      const request = this.pool.request();
+      const placeholders = batch.map((_, j) => `@k${j}`).join(',');
+      batch.forEach((k, j) => request.input(`k${j}`, sql.NVarChar, k));
+
+      const result = await request.query(`
+        SELECT DISTINCT [${lookupCol}], [${resultCol}]
+        FROM ${tableRef(table)} WITH (NOLOCK)
+        WHERE [${lookupCol}] IN (${placeholders})
+          AND [${lookupCol}] IS NOT NULL
+          AND [${resultCol}] IS NOT NULL
+      `);
+      for (const row of result.recordset) {
+        const k = String(row[lookupCol] ?? '').trim();
+        const v = String(row[resultCol] ?? '').trim();
+        if (k && v && !map.has(k)) map.set(k, v); // first occurrence wins (1:1 verified)
+      }
+    }
+    return map;
+  }
+
   /** Execute คำสั่ง query ทั่วไป (Read-Only) */
   async query<T>(sql_query: string, inputs?: Record<string, unknown>): Promise<T[]> {
     const req = this.pool.request();

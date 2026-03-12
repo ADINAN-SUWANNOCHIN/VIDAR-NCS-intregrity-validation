@@ -119,6 +119,27 @@ export interface TransactionGrouping {
   // Use when an indexed column (e.g. journalseqno) stores the same value as keys.new
   // but has an index while keys.new does not — avoids full table scan on target fetch.
   target_fetch_key?: string;
+  /**
+   * Composite group key — adds a second key component beyond keys.old/keys.new.
+   *
+   * Used when one source sysref covers many accounts (CE/RQ batch sysrefs) and each
+   * (sysref × account) pair maps to exactly one new row.
+   *
+   * Old group key:  keys.old + composite_key.old_col  (e.g. systemreferenceno + accountno)
+   * New group key:  keys.new + composite_key.new_col  (e.g. systemreferenceno + lvaccountno)
+   *
+   * account_mapping: optional lookup table to translate old_col value → new_col value.
+   * If omitted, old_col value is used directly as new_col value (identity mapping).
+   */
+  composite_key?: {
+    old_col: string;          // column in old rows for 2nd key part (e.g. 'accountno')
+    new_col: string;          // column in new rows for 2nd key part (e.g. 'lvaccountno')
+    account_mapping?: {       // lookup table translating old_col → new_col
+      table: string;          // full table ref (e.g. '[ncs-conv-aging].dbo.[conv$vinpllvcithistory]')
+      lookup_col: string;     // column to match against old_col value (e.g. 'invaccountno')
+      result_col: string;     // column to return as new_col value (e.g. 'newinvaccountno')
+    };
+  };
 }
 
 /**
