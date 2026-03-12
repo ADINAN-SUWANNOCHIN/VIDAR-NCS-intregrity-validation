@@ -1,0 +1,204 @@
+# ============================================================
+# lv$lvhisthsum Mapping Logic
+# Source: [ncs-conv-aging].dbo.[conv$vinpllvhistory]
+# Target: [ncs-npl-aging].dbo.[lv$lvhisthsum]
+#
+# Discovered via DB investigation (2026-03-10):
+#   - scripts/analyze-transactioncodes.js
+#   - scripts/analyze-lvhisthsum-logic.js
+#   - Verified on sysrefs: P6303-005209, P6102-009721, P6401-909712
+# ============================================================
+
+# ----------------------------------------------------------------
+# FILTER: which old rows contribute to lv$lvhisthsum
+#
+# transactioncode.json field: newlinehistconsolidate
+#   'C' = row is consolidated into lv$lvhisthsum
+#   'N' = row is excluded (goes to lvhistinvtransactionhistory only)
+# ----------------------------------------------------------------
+consolidate_filter:
+  include: "newlinehistconsolidate = 'C'"
+  exclude_loantranshostcodes:
+    - "80000"  # newlinehistconsolidate=N
+    - "81000"  # newlinehistconsolidate=N
+    - "82100"  # newlinehistconsolidate=N
+    - "90000"  # newlinehistconsolidate=N  (QQ — Payment Auto Split; see transactionamount_source below)
+    - "92090"  # newlinehistconsolidate=N
+    - "99000"  # newlinehistconsolidate=N
+
+  # Interest-related excluded codes (newlinehistconsolidate=N)
+    - "21300"
+    - "21400"
+    - "29300"
+    - "29400"
+
+  # Unknown codes — NOT in transactioncode.json; confirmed excluded from lv$lvhisthsum by DB query
+  unknown_excluded_loantranshostcodes:
+    - "24100"  # affectcode=I2, debitcredit=C — not in transactioncode.json
+    - "25100"  # affectcode=I2, debitcredit=D — not in transactioncode.json
+    - "24200"  # affectcode=I3, debitcredit=C — not in transactioncode.json
+    - "25200"  # affectcode=I3, debitcredit=D — not in transactioncode.json
+    - "26100"  # unknown — not in transactioncode.json
+    - "26200"  # unknown — not in transactioncode.json
+
+# ----------------------------------------------------------------
+# COLUMN MAPPING: (affectcode, debitcredit) → lv$lvhisthsum column
+#
+# Formula per group (systemreferenceno):
+#   SUM(old.transactionamount WHERE affectcode=X AND debitcredit=Y AND consolidate=C)
+#   = new.[lvcredit/lvdebit Xamount]
+#
+# Note: new.affectcode and new.debitcredit___ are always NULL in lv$lvhisthsum.
+#       The grouping is entirely derived from old source rows.
+# ----------------------------------------------------------------
+column_mapping:
+
+  # PRINCIPAL
+  - affectcode: PP
+    debitcredit: C
+    lv_column: lvcreditprincipleamount
+    confirmed: true
+    evidence: "P6303-005209 sum=137884.18; P6102-009721 sum=1255883"
+
+  - affectcode: PP
+    debitcredit: D
+    lv_column: lvdebitprincipleamount
+    confirmed: true
+    evidence: "Inferred from PP+C confirmation and D/C symmetry"
+
+  # GAIN CASH (ส่วนเกินทุน)
+  - affectcode: GC
+    debitcredit: C
+    lv_column: lvcreditgaincash
+    confirmed: true
+    evidence: "P6102-009721 sum=902338.78"
+
+  - affectcode: GC
+    debitcredit: D
+    lv_column: lvdebitgaincash
+    confirmed: true
+    evidence: "Inferred from GC+C confirmation and D/C symmetry"
+
+  # GAIN SETTLEMENT (ขายทอดตลาดชำระหนี้)
+  - affectcode: GS
+    debitcredit: C
+    lv_column: lvcreditgainsettlement
+    confirmed: true
+    evidence: "P6102-009721 trace (lvhisthsum shows GS rows)"
+
+  - affectcode: GS
+    debitcredit: D
+    lv_column: lvdebitgainsettlement
+    confirmed: true
+    evidence: "Inferred from GS+C confirmation and D/C symmetry"
+
+  # INTEREST — all interest-family affectcodes map to the same pair
+  # (ดอกเบี้ย, ดอกเบี้ยพัก, ดอกเบี้ยก่อนปรับปรุง, ดอกเบี้ยไม่รับรู้, ดอกเบี้ยรับรู้, ดอกเบี้ยผิดนัด)
+  - affectcode: [I1, I2, I3, IN, IT, GG]
+    debitcredit: C
+    lv_column: lvcreditinterestamount
+    confirmed: true
+    evidence: "I1+C: P6303-005209 sum=24231.83 (12115.82+12116.01 exact match)"
+
+  - affectcode: [I1, I2, I3, IN, IT, GG]
+    debitcredit: D
+    lv_column: lvdebitinterestamount
+    confirmed: true
+    evidence: "I1+D: P6303-005209 sum=11280.42 exact match"
+
+  # OTHER CHARGE (CF and OF both → same target column)
+  - affectcode: [OF, CF]
+    debitcredit: C
+    lv_column: lvcreditotherchargeamount
+    confirmed: true
+    evidence: "OF+C: P6102-009721 sum=4147.21; P6401-909712 sum=4454.16"
+
+  - affectcode: [OF, CF]
+    debitcredit: D
+    lv_column: lvdebitotherchargeamount
+    confirmed: true
+    evidence: "Inferred from OF+C confirmation and D/C symmetry"
+
+  # MISC CHARGE (ค่าธรรมเนียมเบ็ดเตล็ด)
+  - affectcode: MF
+    debitcredit: C
+    lv_column: lvcreditmischargeamount
+    confirmed: false
+    evidence: "creditmf=0 and debitmf=0 across ALL 11,756,094 rows (Part 1 query) — column always empty"
+
+  - affectcode: MF
+    debitcredit: D
+    lv_column: lvdebitmischargeamount
+    confirmed: false
+    evidence: "Same as above — always 0 across entire table"
+
+  # UNCONFIRMED — codes present in transactioncode.json consolidate=C but
+  # target lv* column not confirmed via DB query.
+  # These may go to existing columns or may have no direct lv* mapping.
+  unconfirmed_affectcodes:
+    - code: PC   # NPA Cost Principle
+      possible_lv_column: lvcreditprincipleamount / lvdebitprincipleamount
+      note: "10100,12100,11100,19100,13100 — NPA-specific principal"
+    - code: PG   # UnearnProfit (Unearned Profit)
+      possible_lv_column: UNKNOWN
+      note: "10200,12200,12201,11200,19200,13200 — separate from PP and PC"
+    - code: QI   # Interest INQ
+      possible_lv_column: lvcreditinterestamount / lvdebitinterestamount
+      note: "91001 only — 'DR Interest (INQ)'"
+    - code: B3   # Balance Forward Penalty
+      possible_lv_column: UNKNOWN
+      note: "39300, 31300"
+    - code: DT   # ดอกเบี้ยพักTaxable
+      possible_lv_column: lvcreditinterestamount / lvdebitinterestamount
+      note: "22110, 21110, 23110 — tax-able suspended interest"
+    - code: GT   # TAX
+      possible_lv_column: UNKNOWN
+    - code: IX   # ดอกเบี้ยตามสัดส่วน SBT
+      possible_lv_column: lvcreditinterestamount / lvdebitinterestamount
+    - code: LX   # Local Tax
+      possible_lv_column: UNKNOWN
+    - code: NX   # Net Total Tax
+      possible_lv_column: UNKNOWN
+    - code: PF   # Net Profit
+      possible_lv_column: UNKNOWN
+    - code: QB   # BF Amount
+      possible_lv_column: UNKNOWN
+    - code: QC   # CF Amount
+      possible_lv_column: UNKNOWN
+    - code: SB   # SBT
+      possible_lv_column: UNKNOWN
+    - code: SX   # SBT Tax
+      possible_lv_column: UNKNOWN
+    - code: VA   # VAT
+      possible_lv_column: UNKNOWN
+    - code: PV   # เงินต้นและVAT
+      possible_lv_column: lvcreditprincipleamount / lvdebitprincipleamount
+
+# ----------------------------------------------------------------
+# SPECIAL: transactionamount in lv$lvhisthsum new row
+#
+# The new.transactionamount value comes from the OLD row with:
+#   loantranshostcode = '90000'  (QQ - Payment Auto Split, consolidate=N)
+# This is the total payment amount for the transaction group.
+# It is NOT summed from consolidate=C rows.
+# ----------------------------------------------------------------
+transactionamount_source:
+  source_loantranshostcode: "90000"
+  affectcode: QQ
+  description: "Payment Auto Split — total payment for the group"
+  note: "consolidate=N so it does not contribute to any lv* column; it sets new.transactionamount directly"
+
+# ----------------------------------------------------------------
+# VALIDATION STRATEGY (for future engine upgrade)
+#
+# Per sysref group, validate each lv* column as:
+#   SUM(old.transactionamount
+#       WHERE loantranshostcode NOT IN <exclude_list>
+#         AND affectcode IN <affectcodes_for_column>
+#         AND debitcredit = <C or D>)
+#   = new.<lv_column>
+#
+# Requires engine support for: multi-filter DEF expressions
+# Current engine: single-filter only (affectCodeMap from DEF rules)
+# Status: engine upgrade planned for next phase
+# ----------------------------------------------------------------

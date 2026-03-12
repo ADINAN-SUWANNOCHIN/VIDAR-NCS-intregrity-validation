@@ -46,6 +46,7 @@ transaction_grouping:
   keys:
     old: systemreferenceno
     new: systemreferenceno
+  target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
 
 defaults:
   tolerance: 0.01

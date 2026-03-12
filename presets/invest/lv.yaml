@@ -67,3 +67,16 @@ cases:
     rule_path: invest_lv/lvhistinvtransactionhistory
     tables:
       - "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
+
+  # ---------------------------------------------------------------
+  # Case 7: TRANSACTION (composite group key — CE/RQ batch sysrefs)
+  # conv$vinpllvhistory → lv$lvhisthsum
+  # CE% and RQ% sysrefs: one sysref covers many accounts.
+  # Group key: (systemreferenceno, accountno) → (systemreferenceno, lvaccountno)
+  # Account mapping: invaccountno → newinvaccountno via conv$vinpllvcithistory
+  # Verified: CE6302-000001 44,554 accounts → 100% pass
+  # ---------------------------------------------------------------
+  - name: lvhisthsum_cerq
+    rule_path: invest_lv/lvhisthsum_cerq
+    tables:
+      - "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"

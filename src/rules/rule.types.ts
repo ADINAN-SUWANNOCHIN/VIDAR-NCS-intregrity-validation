@@ -74,13 +74,36 @@ export interface PivotMatch {
   new_col: string;          // new table column name
 }
 
+/**
+ * Sum a source column filtered by (affectcode_in, debitcredit, loantranshostcode_not_in)
+ * and compare to one target column.
+ *
+ * Used for lv$lvhisthsum lvcredit_/lvdebit_ columns where the new column is derived
+ * by summing old.transactionamount for rows matching a specific (affectcode, debitcredit)
+ * combination while excluding consolidate=N loantranshostcodes.
+ *
+ * Example:
+ *   SUM(old.transactionamount WHERE affectcode IN [PP] AND debitcredit=C AND tc NOT IN [...])
+ *   = new.lvcreditprincipleamount
+ */
+export interface FilteredSumMatch {
+  old: string;                            // source column to sum (e.g. transactionamount)
+  old_filter: {
+    affectcode_in?: string[];             // e.g. ['PP'] or ['I1','I2','I3','IN','IT','GG']
+    debitcredit?: string;                 // 'C' or 'D'
+    loantranshostcode_not_in?: string[];  // consolidate=N exclusion list
+  };
+  new: string;                            // target column (e.g. lvcreditprincipleamount)
+}
+
 export interface SchemaMappings {
   exact_matches?: ExactMatch[];
   split_matches?: SplitMatch[];
   transformed_matches?: TransformedMatch[];
   concat_matches?: ConcatMatch[];
-  formula_matches?: FormulaMatch[];  // TRANSACTION / MASTER: multi-col arithmetic → one target col
-  pivot_matches?: PivotMatch[];      // HEADER type only
+  formula_matches?: FormulaMatch[];          // multi-col arithmetic → one target col
+  filtered_sum_matches?: FilteredSumMatch[]; // filtered group-sum → one target col (lv* columns)
+  pivot_matches?: PivotMatch[];              // HEADER type only
 }
 
 export interface TransactionGrouping {
@@ -91,6 +114,32 @@ export interface TransactionGrouping {
   // Falls back to keys.old if a source is not listed here.
   // Use when different sources call the shared group key by different column names.
   source_key_aliases?: Record<string, string>;
+  // Override which column is used in the WHERE IN query when fetching new rows.
+  // Defaults to keys.new when not set.
+  // Use when an indexed column (e.g. journalseqno) stores the same value as keys.new
+  // but has an index while keys.new does not — avoids full table scan on target fetch.
+  target_fetch_key?: string;
+  /**
+   * Composite group key — adds a second key component beyond keys.old/keys.new.
+   *
+   * Used when one source sysref covers many accounts (CE/RQ batch sysrefs) and each
+   * (sysref × account) pair maps to exactly one new row.
+   *
+   * Old group key:  keys.old + composite_key.old_col  (e.g. systemreferenceno + accountno)
+   * New group key:  keys.new + composite_key.new_col  (e.g. systemreferenceno + lvaccountno)
+   *
+   * account_mapping: optional lookup table to translate old_col value → new_col value.
+   * If omitted, old_col value is used directly as new_col value (identity mapping).
+   */
+  composite_key?: {
+    old_col: string;          // column in old rows for 2nd key part (e.g. 'accountno')
+    new_col: string;          // column in new rows for 2nd key part (e.g. 'lvaccountno')
+    account_mapping?: {       // lookup table translating old_col → new_col
+      table: string;          // full table ref (e.g. '[ncs-conv-aging].dbo.[conv$vinpllvcithistory]')
+      lookup_col: string;     // column to match against old_col value (e.g. 'invaccountno')
+      result_col: string;     // column to return as new_col value (e.g. 'newinvaccountno')
+    };
+  };
 }
 
 /**

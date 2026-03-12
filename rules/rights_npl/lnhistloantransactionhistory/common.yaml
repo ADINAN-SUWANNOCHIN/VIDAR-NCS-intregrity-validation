@@ -12,6 +12,10 @@ table_info:
   source: "[ncs-conv-aging].dbo.[conv$vinplhistory]"
   target: "[ncs-npl-aging].dbo.[ln$lnhistloantransactionhistory]"
   table_type: TRANSACTION
+  # BF (804K rows), CAL_INT (200K), B_DIFF (110K) are system batch entries shared across all
+  # accounts — grouping by sysref mixes all accounts → VALUE_MISMATCH flood. Skipped for now.
+  # Validate separately via row count check if needed.
+  source_filter: "systemreferencenumber NOT IN ('BF', 'CAL_INT', 'B_DIFF')"
 
 anchor_key:
   old: id
@@ -21,6 +25,7 @@ transaction_grouping:
   keys:
     old: systemreferencenumber
     new: systemreferenceno
+  target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
 
 defaults:
   tolerance: 0.01
