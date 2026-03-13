@@ -298,100 +298,112 @@ export class TransactionStrategy extends BaseStrategy {
     ];
     const noisyMap = await this.detectNoisyColumns(source, allOldCols);
 
+    // ── Target cache ──────────────────────────────────────────────────────────────
+    // Copy target table into a global temp table with a clustered index.
+    // This replaces repeated full-table IN-clause scans (16K+ for RQ sysrefs)
+    // with a single upfront scan + indexed seeks for all subsequent lookups.
+    // Requires only SELECT on target — temp tables are created in tempdb (always writable).
+    const tempName = `##dv_ck_${process.pid}_${Date.now()}`;
+    await this.db.createTargetCache(target, tempName, targetFetchKey, ck.new_col);
+
     // Paginate through distinct sysrefs using source_filter
     let lastSysref: string | null = null;
-    while (true) {
-      const sysrefs = await this.db.getDistinctKeys(
-        source, oldKeyCol, SYSREF_BATCH, lastSysref, sourceFilter,
-      );
-      if (sysrefs.length === 0) break;
+    try {
+      while (true) {
+        const sysrefs = await this.db.getDistinctKeys(
+          source, oldKeyCol, SYSREF_BATCH, lastSysref, sourceFilter,
+        );
+        if (sysrefs.length === 0) break;
 
-      // a. Fetch all old rows for this sysref batch
-      const oldRows: Record<string, unknown>[] = [];
-      await this.db.streamRowsByKeys(source, oldKeyCol, sysrefs, (row) => oldRows.push(row));
+        // a. Fetch all old rows for this sysref batch
+        const oldRows: Record<string, unknown>[] = [];
+        await this.db.streamRowsByKeys(source, oldKeyCol, sysrefs, (row) => oldRows.push(row));
 
-      // b. Group old rows by composite key (sysref::accountno)
-      const oldGroupMap = new Map<string, Record<string, unknown>[]>();
-      for (const row of oldRows) {
-        const sysref = String(row[oldKeyCol] ?? '').trim();
-        const acct = String(row[ck.old_col] ?? '').trim();
-        if (!acct) continue;
-        const key = `${sysref}::${acct}`;
-        if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
-        oldGroupMap.get(key)!.push(row);
-        rowsChecked++;
-      }
-
-      // c. Batch-lookup translation table (cithistory: invaccountno → newinvaccountno)
-      const allAccts = [...new Set(
-        oldRows.map((r) => String(r[ck.old_col] ?? '').trim()).filter(Boolean),
-      )];
-      const acctMap: Map<string, string> = ck.account_mapping
-        ? await this.db.batchLookup(
-            ck.account_mapping.table,
-            ck.account_mapping.lookup_col,
-            ck.account_mapping.result_col,
-            allAccts,
-          )
-        : new Map(allAccts.map((a) => [a, a])); // identity — no translation needed
-
-      // d. Fetch all new rows for this sysref batch
-      const newRows: Record<string, unknown>[] = [];
-      await this.db.streamRowsByKeys(target, targetFetchKey, sysrefs, (row) => newRows.push(row));
-
-      // e. Group new rows by composite key (sysref::lvaccountno)
-      const newGroupMap = new Map<string, Record<string, unknown>[]>();
-      for (const row of newRows) {
-        const sysref = String(row[newKeyCol] ?? '').trim();
-        const lvAcct = String(row[ck.new_col] ?? '').trim();
-        if (!lvAcct) continue;
-        const key = `${sysref}::${lvAcct}`;
-        if (!newGroupMap.has(key)) newGroupMap.set(key, []);
-        newGroupMap.get(key)!.push(row);
-      }
-
-      // f. Compare each composite group old→new
-      const mappedNewKeys = new Set<string>();
-      for (const [ckOld, oldGroup] of oldGroupMap) {
-        const [sysref, acct] = ckOld.split('::');
-        const newAcct = acctMap.get(acct);
-        if (!newAcct) {
-          errors.push({
-            errorType: 'ROW_MISSING',
-            groupKey: ckOld,
-            message: `No account mapping found for old [${ck.old_col}=${acct}] (sysref: ${sysref}) — cannot locate new row`,
-          });
-          continue;
+        // b. Group old rows by composite key (sysref::accountno)
+        const oldGroupMap = new Map<string, Record<string, unknown>[]>();
+        for (const row of oldRows) {
+          const sysref = String(row[oldKeyCol] ?? '').trim();
+          const acct = String(row[ck.old_col] ?? '').trim();
+          if (!acct) continue;
+          const key = `${sysref}::${acct}`;
+          if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
+          oldGroupMap.get(key)!.push(row);
+          rowsChecked++;
         }
-        const ckNew = `${sysref}::${newAcct}`;
-        mappedNewKeys.add(ckNew);
 
-        const newGroup = newGroupMap.get(ckNew) ?? [];
-        if (newGroup.length === 0) {
-          errors.push({
-            errorType: 'ROW_MISSING',
-            groupKey: ckNew,
-            message: `Composite group [${ckNew}] found in source (old ${ck.old_col}=${acct}) but not in target`,
-          });
-          continue;
+        // c. Batch-lookup translation table (cithistory: invaccountno → newinvaccountno)
+        const allAccts = [...new Set(
+          oldRows.map((r) => String(r[ck.old_col] ?? '').trim()).filter(Boolean),
+        )];
+        const acctMap: Map<string, string> = ck.account_mapping
+          ? await this.db.batchLookup(
+              ck.account_mapping.table,
+              ck.account_mapping.lookup_col,
+              ck.account_mapping.result_col,
+              allAccts,
+            )
+          : new Map(allAccts.map((a) => [a, a]));
+
+        // d. Fetch all new rows from the TEMP CACHE (indexed — fast seek instead of full scan)
+        const newRows: Record<string, unknown>[] = [];
+        await this.db.streamRowsByKeys(tempName, targetFetchKey, sysrefs, (row) => newRows.push(row));
+
+        // e. Group new rows by composite key (sysref::lvaccountno)
+        const newGroupMap = new Map<string, Record<string, unknown>[]>();
+        for (const row of newRows) {
+          const sysref = String(row[newKeyCol] ?? '').trim();
+          const lvAcct = String(row[ck.new_col] ?? '').trim();
+          if (!lvAcct) continue;
+          const key = `${sysref}::${lvAcct}`;
+          if (!newGroupMap.has(key)) newGroupMap.set(key, []);
+          newGroupMap.get(key)!.push(row);
         }
-        errors.push(...this.validateGroup(ckNew, oldGroup, newGroup, sm, tolerance, noisyMap));
-        errors.push(...this.runDefRules(ckNew, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
-      }
 
-      // Report extra new rows with no corresponding old source
-      for (const [ckNew] of newGroupMap) {
-        if (!mappedNewKeys.has(ckNew)) {
-          errors.push({
-            errorType: 'ROW_MISSING',
-            groupKey: ckNew,
-            message: `Composite group [${ckNew}] found in target but not in source (extra row)`,
-          });
+        // f. Compare each composite group old→new
+        const mappedNewKeys = new Set<string>();
+        for (const [ckOld, oldGroup] of oldGroupMap) {
+          const [sysref, acct] = ckOld.split('::');
+          const newAcct = acctMap.get(acct);
+          if (!newAcct) {
+            errors.push({
+              errorType: 'ROW_MISSING',
+              groupKey: ckOld,
+              message: `No account mapping found for old [${ck.old_col}=${acct}] (sysref: ${sysref}) — cannot locate new row`,
+            });
+            continue;
+          }
+          const ckNew = `${sysref}::${newAcct}`;
+          mappedNewKeys.add(ckNew);
+
+          const newGroup = newGroupMap.get(ckNew) ?? [];
+          if (newGroup.length === 0) {
+            errors.push({
+              errorType: 'ROW_MISSING',
+              groupKey: ckNew,
+              message: `Composite group [${ckNew}] found in source (old ${ck.old_col}=${acct}) but not in target`,
+            });
+            continue;
+          }
+          errors.push(...this.validateGroup(ckNew, oldGroup, newGroup, sm, tolerance, noisyMap));
+          errors.push(...this.runDefRules(ckNew, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
         }
-      }
 
-      lastSysref = sysrefs[sysrefs.length - 1];
-      if (sysrefs.length < SYSREF_BATCH) break;
+        // Report extra new rows with no corresponding old source
+        for (const [ckNew] of newGroupMap) {
+          if (!mappedNewKeys.has(ckNew)) {
+            errors.push({
+              errorType: 'ROW_MISSING',
+              groupKey: ckNew,
+              message: `Composite group [${ckNew}] found in target but not in source (extra row)`,
+            });
+          }
+        }
+
+        lastSysref = sysrefs[sysrefs.length - 1];
+        if (sysrefs.length < SYSREF_BATCH) break;
+      }
+    } finally {
+      await this.db.dropTargetCache(tempName);
     }
 
     this.logger.log(`[TXN-CK] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);

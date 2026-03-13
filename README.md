@@ -1,98 +1,139 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# VIDAR — Data Validation Service
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Post-migration data validation engine for BAM NCS system.
+Compares legacy data (`ncs-conv-aging`) against migrated data (`ncs-npl-aging`) to confirm correctness of the migration.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## Architecture
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
-
-```bash
-$ npm install
+```
+API Request (preset or single rule)
+        │
+        ▼
+ValidationService
+        │  loads rules from rules/{module}/{case}/
+        │
+        ├─► MasterStrategy      — 1:1 row-by-row comparison (MASTER table type)
+        ├─► TransactionStrategy — group-by sysref comparison (TRANSACTION type)
+        │     └─► validateCompositeKey  — composite (sysref+accountno) group key
+        ├─► MultipleStrategy    — N old sources → 1 new target (MULTIPLE type)
+        └─► UnionStrategy       — non-overlapping source split (UNION type)
+                │
+                ▼
+        BaseStrategy (shared)
+          ├─ runDefRules()       — per-group business rule checks (def/*.yaml)
+          ├─ evaluateExpression()— SUM/COUNT/filtered expressions
+          └─ validateGroup()     — column-level comparisons
 ```
 
-## Compile and run the project
+---
+
+## Setup
+
+```bash
+npm install
+```
+
+### Environment Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `DB_HOST` | SQL Server hostname/IP | `172.18.1.153` |
+| `DB_PORT` | SQL Server port | `1433` |
+| `DB_USER` | SQL login | `sa` |
+| `DB_PASSWORD` | SQL password | `...` |
+| `DB_NAME` | Default database (connect context) | `ncs-npl-aging` |
+| `DB_ENCRYPT` | TLS encrypt (default `true`) | `false` for local SQL |
+| `CHUNK_SIZE` | Rows per fetch chunk (default `5000`) | `10000` |
+
+---
+
+## Running
 
 ```bash
 # development
-$ npm run start
+npm run start:dev
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+# production build
+npm run build && npm run start:prod
 ```
 
-## Run tests
+Service starts at `http://localhost:3000` (or configured port).
 
+---
+
+## API
+
+### Run a preset (all cases for a module)
+```
+POST /validation/run-preset
+{
+  "preset": "invest/lv"
+}
+```
+
+### Run a single case
+```
+POST /validation/run
+{
+  "module": "invest_lv",
+  "case": "lvhisthsum"
+}
+```
+
+### List available presets
+```
+GET /validation/presets
+```
+
+### Health check
+```
+GET /
+```
+
+---
+
+## Rules
+
+All validation logic lives in `rules/`. See **[rules/README.md](rules/README.md)** for the full authoring guide.
+
+```
+rules/
+  global/              ← rules that apply to all cases
+  rights_npl/          ← NPL loan transaction history
+  rights_npa/          ← NPA asset transaction history
+  eir_npa/             ← EIR investment history
+  invest_lv/           ← LV investment tables
+
+presets/
+  invest/lv.yaml       ← groups invest_lv cases for one API call
+```
+
+---
+
+## Git / Deployment
+
+Branch strategy:
+```
+develop  ← all active development (commit here)
+sit      ← staging — merge from develop, push to trigger deployment
+main     ← production (infra team manages)
+```
+
+**Never commit directly to `sit`.** Always commit to `develop` first, then merge:
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+git checkout sit
+git merge develop
+git push origin sit
 ```
 
-## Deployment
+CI/CD is handled by the infra team's Jenkins pipeline. Kubernetes deployment is managed by infra — we deliver the image only.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+GitLab: `http://172.18.1.92` → `bam-ncs-automation/vidar`
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+---
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+## Adding a New Rule
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+See [rules/README.md → How to Add a New Rule](rules/README.md#how-to-add-a-new-rule).

@@ -385,4 +385,52 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const result = await req.query(sql_query);
     return result.recordset as T[];
   }
+
+  /**
+   * Copies a full table into a global temp table and creates a clustered index.
+   * Used by composite-key validation to avoid repeated full table scans on
+   * unindexed target tables (e.g. lv$lvhisthsum with no index on systemreferenceno).
+   *
+   * The temp table is global (##name) so it is visible across all pool connections.
+   * Name includes process PID + timestamp to guarantee uniqueness per run.
+   *
+   * Safety: drops any existing table with the same name before creating (crash recovery).
+   * Permissions: only requires SELECT on sourceTable — temp tables are always created
+   * in tempdb where all logins have implicit CREATE TABLE rights.
+   */
+  async createTargetCache(
+    sourceTable: string,
+    tempName: string,
+    primaryIndexCol: string,
+    secondaryIndexCol: string,
+  ): Promise<void> {
+    // Safety drop in case previous run crashed without cleanup
+    await this.pool.request().query(
+      `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
+    );
+    this.logger.log(`[TempCache] Copying ${sourceTable} → [${tempName}] (full scan, once)...`);
+    await this.pool.request().query(
+      `SELECT * INTO [${tempName}] FROM ${tableRef(sourceTable)} WITH (NOLOCK)`,
+    );
+    this.logger.log(`[TempCache] Building index on ([${primaryIndexCol}], [${secondaryIndexCol}])...`);
+    await this.pool.request().query(
+      `CREATE CLUSTERED INDEX [ix_dv_ck] ON [${tempName}] ([${primaryIndexCol}], [${secondaryIndexCol}])`,
+    );
+    this.logger.log(`[TempCache] Ready: [${tempName}]`);
+  }
+
+  /**
+   * Drops the global temp table created by createTargetCache.
+   * Called in a finally block so it always runs even if validation throws.
+   */
+  async dropTargetCache(tempName: string): Promise<void> {
+    try {
+      await this.pool.request().query(
+        `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
+      );
+      this.logger.log(`[TempCache] Dropped [${tempName}]`);
+    } catch (e: any) {
+      this.logger.warn(`[TempCache] Failed to drop [${tempName}]: ${e.message}`);
+    }
+  }
 }
