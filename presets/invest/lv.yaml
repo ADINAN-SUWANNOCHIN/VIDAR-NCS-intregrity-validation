@@ -69,12 +69,13 @@ cases:
       - "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
 
   # ---------------------------------------------------------------
-  # Case 7: TRANSACTION (composite group key — CE/RQ batch sysrefs)
+  # Case 7: TRANSACTION (composite group key — batch sysrefs)
   # conv$vinpllvhistory → lv$lvhisthsum
-  # CE% and RQ% sysrefs: one sysref covers many accounts.
+  # CE/RQ/TD/IN/REV/AE/TMB/IR: one sysref covers multiple accounts.
   # Group key: (systemreferenceno, accountno) → (systemreferenceno, lvaccountno)
   # Account mapping: invaccountno → newinvaccountno via conv$vinpllvcithistory
-  # Verified: CE6302-000001 44,554 accounts → 100% pass
+  # Verified: CE 100% pass. TD/IN/REV/AE/TMB/IR: cithistory coverage confirmed.
+  # Pending: Z-prefix, BF (sysref explosion between old→new, needs investigation)
   # ---------------------------------------------------------------
   - name: lvhisthsum_cerq
     rule_path: invest_lv/lvhisthsum_cerq

@@ -516,6 +516,7 @@ export class TransactionStrategy extends BaseStrategy {
         if (f.affectcode_in?.length && !f.affectcode_in.includes(String(row['affectcode'] ?? ''))) return false;
         if (f.debitcredit && String(row['debitcredit'] ?? '') !== f.debitcredit) return false;
         if (f.loantranshostcode_not_in?.includes(String(row['loantranshostcode'] ?? ''))) return false;
+        if (f.loantranshostcode_in?.length && !f.loantranshostcode_in.includes(String(row['loantranshostcode'] ?? ''))) return false;
         return true;
       });
       const oldSum = this.sumColumn(filteredOld, mapping.old) ?? 0;

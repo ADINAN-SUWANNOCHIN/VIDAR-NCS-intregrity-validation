@@ -92,6 +92,7 @@ export interface FilteredSumMatch {
     affectcode_in?: string[];             // e.g. ['PP'] or ['I1','I2','I3','IN','IT','GG']
     debitcredit?: string;                 // 'C' or 'D'
     loantranshostcode_not_in?: string[];  // consolidate=N exclusion list
+    loantranshostcode_in?: string[];      // whitelist: only include rows with these lthc values
   };
   new: string;                            // target column (e.g. lvcreditprincipleamount)
 }

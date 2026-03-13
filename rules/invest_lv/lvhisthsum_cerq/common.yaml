@@ -2,7 +2,10 @@
 # invest_lv / Case 7: TRANSACTION (composite group key)
 # conv$vinpllvhistory → lv$lvhisthsum
 #
-# This rule validates CE/RQ batch sysrefs only.
+# This rule validates all batch/composite-key sysrefs:
+# CE, RQ, TD, IN, REV, AE, TMB, IR, TW, DVD, GHB, SAL, YIELD-END,
+# Z#P, ZER, BF, and bank portfolio prefixes (SCB, UOB, TTB, BAY, KTB,
+# KBAN, TBAN, CIMB, LHB, SCIB, SCBT, TCRB, SMC, BT, EXIM, ICBC, AAI).
 # These sysrefs cover multiple accounts per sysref, so the group
 # key is a COMPOSITE of (systemreferenceno, accountno).
 #
@@ -48,9 +51,90 @@ table_info:
   source: "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
   target: "[ncs-npl-aging].dbo.[lv$lvhisthsum]"
   table_type: TRANSACTION
-  # CE% and RQ% sysrefs are batch transactions with multiple accounts per sysref.
-  # Each (sysref, accountno) pair maps to one new row via cithistory account translation.
-  source_filter: "systemreferenceno LIKE 'CE%' OR systemreferenceno LIKE 'RQ%'"
+  # Batch/composite-key sysrefs — each (sysref, accountno) maps to one new row via cithistory.
+  #
+  # --- Confirmed batch (multiple accounts per sysref) ---
+  # CE%       — 201 sysrefs,  avg 19,431 accts, cithistory ~99% ✓ (100% pass on 44,554 accts)
+  # TD%       — 2,291 sysrefs, avg 528 accts,   cithistory ~99% ✓
+  # IN%       — 2,046 sysrefs, avg 489 accts,   cithistory ~98% ✓
+  # REV%      — 2,574 sysrefs, avg 79 accts,    cithistory 100% ✓
+  # AE%       — 7,689 sysrefs, avg 9.3 accts,   cithistory 100% ✓
+  # TMB%      — 28 sysrefs,    avg 318 accts,   cithistory 100% ✓
+  # TW-%      — 315 sysrefs,   avg 399 accts,   in old ✓
+  # DVD-%     — 864 sysrefs,   avg 156 accts,   in old ✓
+  # GHB%      — 9 sysrefs,     avg 4,501 accts, in old ✓ (Government Housing Bank portfolios)
+  # SAL%      — 17 sysrefs,    avg 575 accts,   in old ✓ (note: ~35% row reduction, ask business)
+  # YIELD-END — 1 sysref,      25,096 accts,    in old ✓
+  # Z#P%      — 8 sysrefs,     avg 25,672 accts, cithistory ✓ (closed account batch)
+  # ZER%      — 632 sysrefs,   avg 464 accts,   cithistory ✓ (zero/written-off accounts)
+  # BF%       — 2 main sysrefs, avg 48K accts,  cithistory ~97.5% (BF=Balance Brought Forward)
+  #             ~2.4% unmapped accounts are pre-migration legacy (acceptable ROW_MISSING noise)
+  #
+  # --- Confirmed sysref-level but needs cithistory (mostly 1:1) ---
+  # RQ%       — 812K sysrefs, avg 1.00 accts,   cithistory via lookup ✓
+  # IR%       — 366K sysrefs, avg 1.02 accts,   cithistory 100% ✓
+  #
+  # --- Bank portfolio acquisitions (composite-key) ---
+  # SCB%, UOB%, TTB%, BAY%, KTB%, KBAN%, TBAN%, CIMB%, LHB%, SCIB%, SCBT%
+  # TCRB%, SMC%, BT%, EXIM%, ICBC%, AAI-%
+  #   All are NPL portfolios transferred from other Thai banks. Composite-key via cithistory.
+  #
+  # --- Excluded (NOT from vinpllvhistory) ---
+  #   ZLS%  — 0 rows in old table, comes from different source (all-zero amounts in new)
+  #
+  # --- Sysref-level, confirmed CITHISTORY (avg 1 acct/sysref) ---
+  # APEG%  — 140,570 sysrefs, cithistory ✓
+  # APE%   — 35,693 sysrefs (subset of APE, excl APEG already covered), cithistory ✓
+  # ABS-%  — 34,744 sysrefs, cithistory ✓
+  # OTE%   — 32,522 sysrefs, cithistory ✓
+  # AGP%   — 8,744 sysrefs,  cithistory ✓
+  # RP%    — 6,588 sysrefs,  cithistory ✓
+  # B%     — 36,494 sysrefs, cithistory ✓ (B_BEGIN_AMC and similar)
+  # ADJ%   — 1,107+ sysrefs, cithistory ✓ (covers ADJ, ADJUST, ADJY, ADJE, ADJI, etc.)
+  #
+  # NOT included (0 rows in old table — come from different source):
+  #   BTAX, ATAX, JV, RAM
+  source_filter: >-
+    systemreferenceno LIKE 'CE%'
+    OR systemreferenceno LIKE 'RQ%'
+    OR systemreferenceno LIKE 'TD%'
+    OR systemreferenceno LIKE 'IN%'
+    OR systemreferenceno LIKE 'REV%'
+    OR systemreferenceno LIKE 'AE%'
+    OR systemreferenceno LIKE 'TMB%'
+    OR systemreferenceno LIKE 'IR%'
+    OR systemreferenceno LIKE 'TW-%'
+    OR systemreferenceno LIKE 'DVD-%'
+    OR systemreferenceno LIKE 'GHB%'
+    OR systemreferenceno LIKE 'SAL%'
+    OR systemreferenceno = 'YIELD-END'
+    OR systemreferenceno LIKE 'Z#P%'
+    OR systemreferenceno LIKE 'ZER%'
+    OR systemreferenceno LIKE 'BF%'
+    OR systemreferenceno LIKE 'SCB%'
+    OR systemreferenceno LIKE 'UOB%'
+    OR systemreferenceno LIKE 'TTB%'
+    OR systemreferenceno LIKE 'BAY%'
+    OR systemreferenceno LIKE 'KTB%'
+    OR systemreferenceno LIKE 'KBAN%'
+    OR systemreferenceno LIKE 'TBAN%'
+    OR systemreferenceno LIKE 'CIMB%'
+    OR systemreferenceno LIKE 'LHB%'
+    OR systemreferenceno LIKE 'SCIB%'
+    OR systemreferenceno LIKE 'SCBT%'
+    OR systemreferenceno LIKE 'TCRB%'
+    OR systemreferenceno LIKE 'SMC%'
+    OR systemreferenceno LIKE 'BT%'
+    OR systemreferenceno LIKE 'EXIM%'
+    OR systemreferenceno LIKE 'ICBC%'
+    OR systemreferenceno LIKE 'AAI-%'
+    OR systemreferenceno LIKE 'APE%'
+    OR systemreferenceno LIKE 'ABS-%'
+    OR systemreferenceno LIKE 'OTE%'
+    OR systemreferenceno LIKE 'AGP%'
+    OR systemreferenceno LIKE 'RP%'
+    OR systemreferenceno LIKE 'B%'
+    OR systemreferenceno LIKE 'ADJ%'
 
 anchor_key:
   old: id
@@ -259,6 +343,38 @@ schema_mappings:
         debitcredit: D
         loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
       new: lvdebitotherchargeamount
+
+    # YIELD (ผลตอบแทน)
+    # lthc 25100 = yield debit; lthc 24100/26100 = yield credit; lthc 26200 = yield credit (I3)
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I2, I3]
+        debitcredit: C
+        loantranshostcode_in: ["24100", "26100", "26200"]
+      new: lvcredityieldamount
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I2, I3]
+        debitcredit: D
+        loantranshostcode_in: ["25100"]
+      new: lvdebityieldamount
+
+    # IRR (อัตราดอกเบี้ยภายใน)
+    # lthc 25200 = IRR debit; lthc 24200 = IRR credit
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I3]
+        debitcredit: D
+        loantranshostcode_in: ["25200"]
+      new: lvdebitirramount
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I3]
+        debitcredit: C
+        loantranshostcode_in: ["24200"]
+      new: lvcreditirramount
 
   # ---------------------------------------------------------------
   # lvformat* columns — NOT mapped here (derived, validated implicitly)

@@ -498,7 +498,7 @@ export abstract class BaseStrategy {
    * Supported formats:
    *   SUM(old.col)                       — sum of col across all old rows
    *   SUM(new.col)                       — sum of col across all new rows
-   *   SUM(old.col[filterCol=val])        — conditional sum (bracket filter)
+   *   SUM(old.col[f1=v1][f2=v2]...)      — conditional sum (one or more bracket filters AND-ed)
    *   SUM(old.col) WHERE filterCol == 'val'  — same as bracket filter (legacy syntax)
    *   COUNT(old)                         — number of old rows in this group
    *   COUNT(new)                         — number of new rows in this group
@@ -519,12 +519,20 @@ export abstract class BaseStrategy {
         .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
     }
 
-    // SUM(old.col[filterCol=val])  — bracket filter (shorter YAML syntax)
-    const bracketMatch = t.match(/^SUM\(old\.(\w+)\[(\w+)=([^\]]+)\]\)$/i);
+    // SUM(old.col[f1=v1][f2=v2]...)  — one or more bracket filters (shorter YAML syntax)
+    const bracketMatch = t.match(/^SUM\(old\.(\w+)((?:\[[^\]]+\])+)\)$/i);
     if (bracketMatch) {
-      const [, col, filterCol, filterVal] = bracketMatch;
+      const [, col, bracketStr] = bracketMatch;
+      const conditions = [...bracketStr.matchAll(/\[(\w+)=([^\]]+)\]/g)].map(
+        (m) => [m[1], m[2].trim()] as [string, string],
+      );
       return oldRows
-        .filter((r) => String(r[filterCol] ?? '').toUpperCase() === filterVal.trim().toUpperCase())
+        .filter((r) =>
+          conditions.every(
+            ([filterCol, filterVal]) =>
+              String(r[filterCol] ?? '').toUpperCase() === filterVal.toUpperCase(),
+          ),
+        )
         .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
     }
 
@@ -546,7 +554,7 @@ export abstract class BaseStrategy {
 
     throw new Error(
       `DEF rule expression not parseable: "${expr}" — ` +
-      `supported: SUM(old.col), SUM(new.col), SUM(old.col[filterCol=val]), COUNT(old), COUNT(new)`,
+      `supported: SUM(old.col), SUM(new.col), SUM(old.col[f1=v1][f2=v2]...), COUNT(old), COUNT(new)`,
     );
   }
 
