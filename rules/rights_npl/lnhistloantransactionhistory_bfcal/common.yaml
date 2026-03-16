@@ -30,7 +30,7 @@ transaction_grouping:
     old: systemreferencenumber
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
-  use_group_pagination: true      # only 3 distinct sysrefs — one fetch per group
+  use_sysref_sort: true         # only 3 distinct sysrefs — one fetch per group
 
 defaults:
   tolerance: 0.01

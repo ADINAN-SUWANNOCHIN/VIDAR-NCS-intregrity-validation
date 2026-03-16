@@ -145,6 +145,25 @@ export interface TransactionGrouping {
    */
   use_group_pagination?: boolean;
   /**
+   * Sysref-sort mode — page OLD table sorted by group key (sysref), carry-over at boundary.
+   *
+   * Better than use_group_pagination for the same scatter problem:
+   *   - use_group_pagination: getDistinctKeys (full scan) + streamRowsByKeys (full scan) = 2× old scans per batch
+   *   - use_sysref_sort:      fetchChunk ORDER BY sysref (full scan once) = 1× old scan per chunk
+   *
+   * Since old rows are sorted by sysref, all rows for the same sysref are contiguous.
+   * Scatter is impossible within the sorted order — carry-over only needs to bridge ONE
+   * chunk boundary per sysref, which is the same guarantee as the default anchor-key mode.
+   *
+   * Use this instead of use_group_pagination when:
+   *   - Group rows are scattered in id order (same condition as use_group_pagination)
+   *   - No index on sysref column (both modes do full scans, but this does half as many)
+   *
+   * Note: source_filter is applied to fetchChunk — works for both sysref-based and
+   * column-based filters (unlike use_group_pagination which requires sysref-based filters).
+   */
+  use_sysref_sort?: boolean;
+  /**
    * Row-level fingerprint columns for post-mismatch diff.
    *
    * When set, any group that produces a VALUE_MISMATCH will trigger a row-by-row

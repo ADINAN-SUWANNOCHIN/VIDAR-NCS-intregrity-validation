@@ -47,7 +47,7 @@ transaction_grouping:
     old: systemreferencenumber
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
-  use_group_pagination: true      # CONFIRMED SCATTERED: conv$vinpahistory 99.8% groups scattered (ratio 176M×)
+  use_sysref_sort: true         # CONFIRMED SCATTERED: conv$vinpahistory 99.8% groups scattered (ratio 176M×)
   row_fingerprint:
     - old: transactiondate
       new: transactiondate

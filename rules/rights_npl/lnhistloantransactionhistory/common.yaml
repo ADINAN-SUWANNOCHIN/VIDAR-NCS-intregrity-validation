@@ -26,7 +26,7 @@ transaction_grouping:
     old: systemreferencenumber
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
-  use_group_pagination: true      # rows are SCATTERED (BF sysref id_range/cnt ratio ≈2282×)
+  use_sysref_sort: true         # rows are SCATTERED (BF sysref id_range/cnt ratio ≈2282×)
   row_fingerprint:                # post-mismatch row diff — identifies which transaction is missing
     - old: transactiondate
       new: transactiondate

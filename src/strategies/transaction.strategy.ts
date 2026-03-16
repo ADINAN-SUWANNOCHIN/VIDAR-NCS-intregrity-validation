@@ -53,6 +53,12 @@ export class TransactionStrategy extends BaseStrategy {
       return this.validateGroupPagination(ctx);
     }
 
+    // Sysref-sort mode — page old table sorted by sysref, carry-over at boundary.
+    // Same scatter safety as use_group_pagination but ~10× fewer DB round-trips.
+    if (tg.use_sysref_sort) {
+      return this.validateSysrefSort(ctx);
+    }
+
     const oldKeyCol = tg.keys.old;
     const newKeyCol = tg.keys.new;
     // target_fetch_key: use an indexed column (e.g. journalseqno) for the WHERE IN query
@@ -68,7 +74,15 @@ export class TransactionStrategy extends BaseStrategy {
       ...(sm.transformed_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
       ...(sm.concat_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
       ...(sm.formula_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
-      ...(sm.filtered_sum_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.filtered_sum_matches ?? []).map((m) => ({
+        oldCols: [
+          m.old,
+          ...(m.old_filter.affectcode_in?.length ? ['affectcode'] : []),
+          ...(m.old_filter.debitcredit ? ['debitcredit'] : []),
+          ...((m.old_filter.loantranshostcode_not_in?.length || m.old_filter.loantranshostcode_in?.length) ? ['loantranshostcode'] : []),
+        ],
+        newCols: [m.new],
+      })),
     ]);
     if (colErrors.length > 0) {
       errors.push(...colErrors);
@@ -293,7 +307,15 @@ export class TransactionStrategy extends BaseStrategy {
       ...(sm.transformed_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
       ...(sm.concat_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
       ...(sm.formula_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
-      ...(sm.filtered_sum_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.filtered_sum_matches ?? []).map((m) => ({
+        oldCols: [
+          m.old,
+          ...(m.old_filter.affectcode_in?.length ? ['affectcode'] : []),
+          ...(m.old_filter.debitcredit ? ['debitcredit'] : []),
+          ...((m.old_filter.loantranshostcode_not_in?.length || m.old_filter.loantranshostcode_in?.length) ? ['loantranshostcode'] : []),
+        ],
+        newCols: [m.new],
+      })),
     ]);
     if (colErrors.length > 0) {
       errors.push(...colErrors);
@@ -468,7 +490,15 @@ export class TransactionStrategy extends BaseStrategy {
       ...(sm.transformed_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
       ...(sm.concat_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
       ...(sm.formula_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
-      ...(sm.filtered_sum_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.filtered_sum_matches ?? []).map((m) => ({
+        oldCols: [
+          m.old,
+          ...(m.old_filter.affectcode_in?.length ? ['affectcode'] : []),
+          ...(m.old_filter.debitcredit ? ['debitcredit'] : []),
+          ...((m.old_filter.loantranshostcode_not_in?.length || m.old_filter.loantranshostcode_in?.length) ? ['loantranshostcode'] : []),
+        ],
+        newCols: [m.new],
+      })),
     ]);
     if (colErrors.length > 0) {
       errors.push(...colErrors);
@@ -566,6 +596,164 @@ export class TransactionStrategy extends BaseStrategy {
     }
 
     this.logger.log(`[TXN-GP] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
+    return { errors, rowsChecked };
+  }
+
+  // ----------------------------------------------------------------
+  // Sysref-sort mode (use_sysref_sort: true)
+  // ----------------------------------------------------------------
+
+  /**
+   * Page old table sorted by sysref (group key) instead of id.
+   * All rows for the same sysref are contiguous → scatter impossible.
+   * Carry-over handles the single chunk-boundary split case, identical to default mode.
+   *
+   * ~10× fewer DB round-trips vs use_group_pagination (1 scan per chunk vs 2 per batch).
+   */
+  private async validateSysrefSort(
+    ctx: ValidationContext,
+  ): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+    const errors: ValidationError[] = [];
+    let rowsChecked = 0;
+    const { commonRule, defRules, affectCodeMap } = ctx;
+    const { source, target } = commonRule.table_info;
+    const tg = commonRule.transaction_grouping!;
+    let sm = commonRule.schema_mappings;
+    const tolerance = commonRule.defaults?.tolerance ?? 0;
+    const chunkSize = parseInt(process.env.CHUNK_SIZE ?? '5000');
+    const oldKeyCol = tg.keys.old;
+    const newKeyCol = tg.keys.new;
+    const targetFetchKey = tg.target_fetch_key ?? newKeyCol;
+    const sourceFilter = commonRule.table_info.source_filter;
+
+    this.logger.log(`[TXN-SS] Validating ${source} → ${target} grouped by [${oldKeyCol}] (sysref-sort)`);
+
+    // ---- Schema check ----
+    const colErrors = await this.checkMissingColumns(source, target, [
+      ...(sm.exact_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.split_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: m.new_cols })),
+      ...(sm.transformed_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.concat_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
+      ...(sm.formula_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
+      ...(sm.filtered_sum_matches ?? []).map((m) => ({
+        oldCols: [
+          m.old,
+          ...(m.old_filter.affectcode_in?.length ? ['affectcode'] : []),
+          ...(m.old_filter.debitcredit ? ['debitcredit'] : []),
+          ...((m.old_filter.loantranshostcode_not_in?.length || m.old_filter.loantranshostcode_in?.length) ? ['loantranshostcode'] : []),
+        ],
+        newCols: [m.new],
+      })),
+    ]);
+    if (colErrors.length > 0) {
+      errors.push(...colErrors);
+      this.logger.warn(`[TXN-SS] ${colErrors.length} column(s) missing — continuing with valid mappings only`);
+      sm = this.filterMappingsAfterSchemaCheck(sm, colErrors);
+    }
+    errors.push(...await this.reportUnmappedColumns(source, target, sm, 'TXN-SS'));
+
+    // ---- Noisy column detection ----
+    const allOldCols = [
+      ...(sm.exact_matches ?? []).map((m) => m.old),
+      ...(sm.split_matches ?? []).map((m) => m.old),
+      ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.formula_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.filtered_sum_matches ?? []).map((m) => m.old),
+    ];
+    const noisyMap = await this.detectNoisyColumns(source, allOldCols);
+    for (const [col, type] of noisyMap) {
+      if (type !== 'NORMAL') this.logger.warn(`[TXN-SS] Column [${col}] is ${type} — name-only match`);
+    }
+
+    // ---- Sysref-sorted carry-over loop ----
+    // No anchor key uniqueness check — sysref is not unique per row.
+    // fetchChunk uses sysref as the keyset cursor → rows arrive in sysref order.
+    let lastSysref: unknown = null;
+    let carryOld = new Map<string, Record<string, unknown>[]>();
+    let carryNew = new Map<string, Record<string, unknown>[]>();
+
+    while (true) {
+      const oldChunk = await this.db.fetchChunk(source, oldKeyCol, chunkSize, lastSysref, sourceFilter);
+      if (oldChunk.length === 0) break;
+
+      const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
+      const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
+      carryOld = new Map();
+      carryNew = new Map();
+
+      const groupKeyVals = [
+        ...new Set(oldChunk.map((r) => this.normalizeKey(r[oldKeyCol], tg.transform_key))),
+      ].filter((k) => k !== '' && !newGroupMap.has(k));
+
+      const newRows: Record<string, unknown>[] = [];
+      await this.db.streamRowsByKeys(target, targetFetchKey, groupKeyVals, (row) => newRows.push(row));
+
+      for (const row of oldChunk) {
+        const key = this.normalizeKey(row[oldKeyCol], tg.transform_key);
+        if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
+        oldGroupMap.get(key)!.push(row);
+        rowsChecked++;
+      }
+      for (const row of newRows) {
+        const key = this.normalizeKey(row[newKeyCol], tg.transform_key);
+        if (!newGroupMap.has(key)) newGroupMap.set(key, []);
+        newGroupMap.get(key)!.push(row);
+      }
+
+      const isLastChunk = oldChunk.length < chunkSize;
+      const carryKey = !isLastChunk ? [...oldGroupMap.keys()].at(-1) : undefined;
+      if (carryKey) {
+        carryOld.set(carryKey, oldGroupMap.get(carryKey)!);
+        if (newGroupMap.has(carryKey)) carryNew.set(carryKey, newGroupMap.get(carryKey)!);
+      }
+
+      for (const [groupKey, oldGroup] of oldGroupMap) {
+        if (groupKey === carryKey) continue;
+        const newGroup = newGroupMap.get(groupKey) ?? [];
+        if (newGroup.length === 0) {
+          errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
+          continue;
+        }
+        const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
+        errors.push(...groupErrors);
+        if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
+          errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+        }
+        errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+      }
+
+      for (const [groupKey] of newGroupMap) {
+        if (groupKey === carryKey) continue;
+        if (!oldGroupMap.has(groupKey)) {
+          errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in target but not in source (extra row)` });
+        }
+      }
+
+      lastSysref = oldChunk[oldChunk.length - 1][oldKeyCol];
+      if (isLastChunk) break;
+    }
+
+    // Flush carry
+    for (const [groupKey, oldGroup] of carryOld) {
+      const newGroup = carryNew.get(groupKey) ?? [];
+      if (newGroup.length === 0) {
+        errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
+        continue;
+      }
+      const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
+      errors.push(...groupErrors);
+      if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
+        errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+      }
+      errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+    }
+    for (const [groupKey] of carryNew) {
+      if (!carryOld.has(groupKey)) {
+        errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in target but not in source (extra row at chunk boundary)` });
+      }
+    }
+
+    this.logger.log(`[TXN-SS] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
     return { errors, rowsChecked };
   }
 

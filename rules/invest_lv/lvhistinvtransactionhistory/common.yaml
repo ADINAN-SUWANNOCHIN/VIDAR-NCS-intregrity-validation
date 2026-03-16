@@ -67,7 +67,7 @@ transaction_grouping:
     old: systemreferenceno
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
-  use_group_pagination: true      # rows are SCATTERED (id_range/cnt ratio ≈27K×, 83.7% of groups)
+  use_sysref_sort: true         # rows are SCATTERED (id_range/cnt ratio ≈27K×, 83.7% of groups)
                                   # anchor-key streaming would compare partial groups → false errors
   row_fingerprint:                # post-mismatch row diff — identifies which transaction is missing
     - old: transactiondate
