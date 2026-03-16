@@ -51,6 +51,8 @@ transaction_grouping:
     old: systemreferenceno
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_group_pagination: true      # rows are SCATTERED (100% of groups, avg ratio 5M×)
+                                  # source_filter filters on group key column → compatible with group pagination
 
 defaults:
   tolerance: 0.01

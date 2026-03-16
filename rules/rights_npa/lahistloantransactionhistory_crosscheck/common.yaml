@@ -34,6 +34,16 @@ transaction_grouping:
   keys:
     old: systemreferenceno
     new: systemreferenceno
+  target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_group_pagination: true      # CONFIRMED SCATTERED: la$lahisthloantransactionhistoryh 47.5%, la$lahistloantransactionhistory 99.8%
+                                  # carry-over streaming produces false VALUE_MISMATCH for partial groups
+  row_fingerprint:
+    - old: accountno
+      new: accountno
+    - old: transactionamount
+      new: transactionamount
+    - old: transactiondate
+      new: transactiondate
 
 defaults:
   tolerance: 0.01

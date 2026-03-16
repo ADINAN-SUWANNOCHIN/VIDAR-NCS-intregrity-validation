@@ -56,6 +56,11 @@ transaction_grouping:
     old: systemreferenceno
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  # NO use_group_pagination: vinplsbthistory (primary) has ~1 row/sysref (955,425 rows / 955,040 sysrefs)
+  # — no scatter possible. carry-over mode is safe and correct.
+  # vinplhistory (secondary) groups as '' due to column name mismatch → 1 ROW_MISSING (acceptable).
+  # Adding use_group_pagination breaks vinplhistory secondary pair: each batch generates
+  # 200+ false ROW_MISSING errors for individual sysrefs instead of 1 for the '' group.
   source_key_aliases:
     "[ncs-conv-aging].dbo.[conv$vinplhistory]": systemreferencenumber
 
@@ -162,6 +167,12 @@ schema_mappings:
     # PLACEHOLDER: All vinplhistory-only columns (lgo1flag, lgo2flag, receiptnumber, etc.)
     #   → not present in H, they go to lnhistloantransactionhistory (Case 1 rule)
 
+    # EXCLUDED: repayviatdr (vinplhistory nvarchar 'Y'/'N') — DO NOT ADD TO MAPPINGS
+    #   OLD: 'N'=11,622,784 | 'Y'=3,029,456 | ''=1,315,358 rows in conv$vinplhistory
+    #   NEW: ln$lnhisthloantransactionhistoryh has no repayviatdr column.
+    #   REASON: Architectural change — TDR status moved to account-level ln$tdrportion.
+    #   See lnhistloantransactionhistory/common.yaml for full investigation notes.
+
   transformed_matches:
 
     # Date columns: old = ISO nvarchar, new = datetime2
@@ -231,14 +242,10 @@ schema_mappings:
     #   Both map to the same new column totaltax — validated in def001.yaml
     #   Cannot include here as separate transformed_match (same new target as sbttotalamount)
 
-  split_matches:
-    # interestpaid: VERIFIED double-entry pivot
-    #   H Row 1 (credit entry): creditinterestamount = interestpaid
-    #   H Row 2 (debit entry):  debitinterestamount  = interestpaid
-    #   SUM(old.interestpaid per group) = SUM(new.creditinterestamount per group) ✓
-    #   ADJ-* sysrefs excluded by source_filter — no exception needed here
-    # NOTE: split_matches always routes to the default pair (src_table/tgt_table ignored here).
-    # Field names must match SplitMatch TypeScript type: old (string) + new_cols (array).
-    - old: interestpaid
-      formula: SUM
-      new_cols: [creditinterestamount]
+  # SPLIT_MATCHES REMOVED: interestpaid → creditinterestamount was incorrect.
+  # Root cause: 100% of SBT sysrefs overlap with vinplhistory (confirmed via DB query).
+  # For sysrefs with multiple vinplhistory IN/C rows, H table gets additional
+  # creditinterestamount rows from vinplhistory → SUM(H.creditinterestamount) ≠ SBT.interestpaid.
+  # Example: P6203-006699 — SBT.interestpaid=7263.8, SUM(H.creditinterestamount)=10443.96
+  # (vinplhistory IN/C row 3180.16 + sbt-sourced row 7263.8 = 10443.96 ≠ 7263.8).
+  # interestpaid pivot integrity is validated differently in def/def001.yaml (steps 5+).

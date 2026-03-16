@@ -636,6 +636,75 @@ export class MultipleStrategy extends BaseStrategy {
         ];
         const noisyMap = await this.detectNoisyColumns(srcTable, allOldCols);
 
+        // ---- Group-key pagination mode (use_group_pagination: true) ----
+        // Mirrors TransactionStrategy.validateGroupPagination.
+        // Use when group rows are SCATTERED in anchor-key (id) order — carry-over streaming
+        // compares partial groups per chunk → false VALUE_MISMATCH errors.
+        if (tg.use_group_pagination) {
+          const GROUP_BATCH = 200;
+          let lastGroupKey: string | null = null;
+          while (true) {
+            const groupKeys = await this.db.getDistinctKeys(
+              srcTable, srcKeyCol, GROUP_BATCH, lastGroupKey, srcFilter,
+            );
+            if (groupKeys.length === 0) break;
+
+            const oldRows: Record<string, unknown>[] = [];
+            await this.db.streamRowsByKeys(srcTable, srcKeyCol, groupKeys, (row) => oldRows.push(row));
+            const newRows: Record<string, unknown>[] = [];
+            await this.db.streamRowsByKeys(tgtTable, targetFetchKey, groupKeys, (row) => newRows.push(row));
+
+            const oldGroupMap = new Map<string, Record<string, unknown>[]>();
+            for (const row of oldRows) {
+              const key = String(row[srcKeyCol] ?? '').trim();
+              if (!key) continue;
+              if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
+              oldGroupMap.get(key)!.push(row);
+              rowsChecked++;
+            }
+
+            const newGroupMap = new Map<string, Record<string, unknown>[]>();
+            for (const row of newRows) {
+              const key = String(row[newKeyCol] ?? '').trim();
+              if (!key) continue;
+              if (!newGroupMap.has(key)) newGroupMap.set(key, []);
+              newGroupMap.get(key)!.push(row);
+            }
+
+            for (const [groupKey, oldGroup] of oldGroupMap) {
+              const newGroup = newGroupMap.get(groupKey) ?? [];
+              if (newGroup.length === 0) {
+                errors.push({
+                  errorType: 'ROW_MISSING',
+                  groupKey,
+                  message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}`,
+                });
+                continue;
+              }
+              const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, { exact, transformed, concat, split, formula }, tolerance, noisyMap);
+              errors.push(...groupErrors);
+              if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
+                errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+              }
+              errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+            }
+
+            for (const [groupKey] of newGroupMap) {
+              if (!oldGroupMap.has(groupKey)) {
+                errors.push({
+                  errorType: 'ROW_MISSING',
+                  groupKey,
+                  message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row)`,
+                });
+              }
+            }
+
+            lastGroupKey = groupKeys[groupKeys.length - 1];
+            if (groupKeys.length < GROUP_BATCH) break;
+          }
+          continue; // skip carry-over streaming for this pair
+        }
+
         // Anchor key uniqueness check (ensures keyset pagination works correctly)
         const anchorDupErr = await this.checkAnchorKeyUnique(srcTable, anchorKeyOld);
         if (anchorDupErr) {

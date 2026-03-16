@@ -24,37 +24,11 @@ def_id: def001
 target_scope: transaction_group
 
 actions:
-  # -------------------------------------------------------
-  # Step 1: interestpaid → creditinterestamount (credit row)
-  # H Row 1 carries creditinterestamount = interestpaid
-  # H Row 2 carries debitinterestamount  = interestpaid (same value, debit side)
-  # Check credit side: SUM(old.interestpaid) = SUM(new.creditinterestamount)
-  # -------------------------------------------------------
-  - step: "1"
-    check_type: ROW_LEVEL_COHESION
-    variables:
-      val_interestpaid: "SUM(old.interestpaid)"
-      val_credit_interest: "SUM(new.creditinterestamount)"
-    condition: "val_interestpaid == val_credit_interest"
-    error_message: >
-      interestpaid not correctly pivoted to creditinterestamount.
-      old.interestpaid={val_interestpaid}, new.creditinterestamount={val_credit_interest}.
-
-  # -------------------------------------------------------
-  # Step 2: interestpaid → debitinterestamount (debit row)
-  # SUM(new.debitinterestamount) should also equal |interestpaid|
-  # For normal transactions: debitinterestamount = interestpaid (positive)
-  # For ADJ transactions: debitinterestamount = abs(interestpaid) (sign-flipped) → will mismatch
-  # -------------------------------------------------------
-  - step: "2"
-    check_type: ROW_LEVEL_COHESION
-    variables:
-      val_interestpaid: "SUM(old.interestpaid)"
-      val_debit_interest: "SUM(new.debitinterestamount)"
-    condition: "val_interestpaid == val_debit_interest"
-    error_message: >
-      interestpaid not correctly pivoted to debitinterestamount.
-      old.interestpaid={val_interestpaid}, new.debitinterestamount={val_debit_interest}.
+  # REMOVED Step 1 (interestpaid → creditinterestamount) and Step 2 (interestpaid → debitinterestamount):
+  # Root cause: 100% of SBT sysrefs overlap with vinplhistory (confirmed via DB query).
+  # For sysrefs with multiple vinplhistory IN/C rows, H gets extra credit/debit rows →
+  # SUM(H.creditinterestamount) ≠ SBT.interestpaid → guaranteed false mismatch.
+  # Double-entry self-balance (step 5) still catches unbalanced rows without false positives.
 
   # -------------------------------------------------------
   # Step 3: interest33 ≈ totaltax in H

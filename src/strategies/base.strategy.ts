@@ -345,6 +345,16 @@ export abstract class BaseStrategy {
       }
 
       for (const action of def.actions) {
+        // Per-action trigger_condition — e.g. step 7 only fires when group has PP rows
+        if (action.trigger_condition?.must_have_all || action.trigger_condition?.must_have_any) {
+          const oldAffectCodes = this.extractAffectCodes(oldGroup, affectCodeMap);
+          if (action.trigger_condition.must_have_all) {
+            if (!action.trigger_condition.must_have_all.every((code) => oldAffectCodes.has(code))) continue;
+          }
+          if (action.trigger_condition.must_have_any) {
+            if (!action.trigger_condition.must_have_any.some((code) => oldAffectCodes.has(code))) continue;
+          }
+        }
         errors.push(...this.evaluateDefAction(def.def_id, groupKey, oldGroup, newGroup, action, tolerance));
       }
     }
@@ -607,6 +617,74 @@ export abstract class BaseStrategy {
     } catch (e: any) {
       throw new Error(`DEF condition evaluation failed: "${condition}": ${e.message}`);
     }
+  }
+
+  /**
+   * Normalizes a fingerprint column value so old and new produce the same string.
+   * - Date object (mssql datetime2) → toISOString().slice(0,10)
+   * - ISO nvarchar "2024-01-15T..." → extract date before T
+   * - Numeric string / number → parseFloat (strips trailing zeros)
+   * - Other → trim to string
+   */
+  protected normalizeFingerprint(v: unknown): string {
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    const s = String(v ?? '').trim();
+    const dateMatch = s.match(/^(\d{4}-\d{2}-\d{2})T/);
+    if (dateMatch) return dateMatch[1];
+    const n = parseFloat(s);
+    if (!isNaN(n) && s !== '') return String(n);
+    return s;
+  }
+
+  /**
+   * Row-level fingerprint diff — call after validateGroup finds errors.
+   * Diffs old vs new as multisets by joining fpCols values with '|'.
+   * Reports ROW_MISSING with [FP] prefix for unmatched rows.
+   */
+  protected fingerprintDiff(
+    groupKey: string,
+    oldGroup: Record<string, unknown>[],
+    newGroup: Record<string, unknown>[],
+    fpCols: Array<{ old: string; new: string }>,
+  ): ValidationError[] {
+    const errors: ValidationError[] = [];
+
+    const buildMultiset = (
+      rows: Record<string, unknown>[],
+      colKey: (c: { old: string; new: string }) => string,
+    ): Map<string, number> => {
+      const map = new Map<string, number>();
+      for (const row of rows) {
+        const fp = fpCols.map((c) => this.normalizeFingerprint(row[colKey(c)])).join('|');
+        map.set(fp, (map.get(fp) ?? 0) + 1);
+      }
+      return map;
+    };
+
+    const oldMs = buildMultiset(oldGroup, (c) => c.old);
+    const newMs = buildMultiset(newGroup, (c) => c.new);
+
+    for (const [fp, cnt] of oldMs) {
+      const missing = cnt - (newMs.get(fp) ?? 0);
+      if (missing > 0) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `[FP] ${missing}x in source not in target — group: ${groupKey} | ${fp}`,
+        });
+      }
+    }
+    for (const [fp, cnt] of newMs) {
+      const extra = cnt - (oldMs.get(fp) ?? 0);
+      if (extra > 0) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `[FP] ${extra}x extra in target not in source — group: ${groupKey} | ${fp}`,
+        });
+      }
+    }
+    return errors;
   }
 
   protected sumColumn(rows: Record<string, unknown>[], col: string): number | null {

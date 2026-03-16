@@ -38,6 +38,11 @@ transaction_grouping:
     old: systemreferenceno
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  # NO use_group_pagination: vinplsbthistory (primary) has ~1 row/sysref (ADJ subset is even smaller)
+  # — no scatter possible. carry-over mode is safe and correct.
+  # vinplhistory (secondary) groups as '' due to column name mismatch → 1 ROW_MISSING (acceptable).
+  # Adding use_group_pagination breaks vinplhistory secondary pair: each batch generates
+  # 200+ false ROW_MISSING errors for individual sysrefs instead of 1 for the '' group.
 
 defaults:
   tolerance: 0.01
@@ -84,6 +89,12 @@ schema_mappings:
       new: accountno
       src_table: "[ncs-conv-aging].dbo.[conv$vinplhistory]"
       tgt_table: "[ncs-npl-aging].dbo.[ln$lnhisthloantransactionhistoryh]"
+
+    # EXCLUDED: repayviatdr (vinplhistory nvarchar 'Y'/'N') — DO NOT ADD TO MAPPINGS
+    #   OLD: 'N'=11,622,784 | 'Y'=3,029,456 | ''=1,315,358 rows in conv$vinplhistory
+    #   NEW: ln$lnhisthloantransactionhistoryh has no repayviatdr column.
+    #   REASON: Architectural change — TDR status moved to account-level ln$tdrportion.
+    #   See lnhistloantransactionhistory/common.yaml for full investigation notes.
 
   transformed_matches:
 

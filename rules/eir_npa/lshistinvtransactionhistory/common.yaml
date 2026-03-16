@@ -36,6 +36,12 @@ transaction_grouping:
     old: systemreferencenumber
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_group_pagination: true      # rows are SCATTERED (100% of groups, avg ratio 11M×)
+  row_fingerprint:                # post-mismatch row diff — identifies which transaction is missing
+    - old: transactiondate
+      new: transactiondate
+    - old: transactionamount
+      new: transactionamount
 
 defaults:
   tolerance: 0.01
@@ -136,3 +142,21 @@ schema_mappings:
     - old: endinterestdate
       new: endinterestdate
       transform_rule: DATE_TO_DATETIME
+
+  # ---------------------------------------------------------------
+  # concat_matches: string identity columns validated in group mode
+  #
+  # In use_group_pagination mode, exact_matches for string columns are
+  # silently skipped (sumColumn returns null for non-numeric values).
+  # concat_matches collects the distinct value set per group, sorts and
+  # joins with '|', then compares old vs new — catching wrong/missing values.
+  # ---------------------------------------------------------------
+  concat_matches:
+    - old_cols: [newaccountno]
+      new: lsaccountno
+
+    - old_cols: [affectcode]
+      new: affectcode
+
+    - old_cols: [debitcredit]
+      new: debitcredit

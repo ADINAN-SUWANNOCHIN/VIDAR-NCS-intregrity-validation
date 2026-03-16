@@ -47,6 +47,12 @@ export class TransactionStrategy extends BaseStrategy {
       return this.validateCompositeKey(ctx);
     }
 
+    // Group-key pagination mode — for tables where group rows are scattered in ID order.
+    // Anchor-key streaming + carry-over breaks when id_range >> row_count per group.
+    if (tg.use_group_pagination) {
+      return this.validateGroupPagination(ctx);
+    }
+
     const oldKeyCol = tg.keys.old;
     const newKeyCol = tg.keys.new;
     // target_fetch_key: use an indexed column (e.g. journalseqno) for the WHERE IN query
@@ -176,7 +182,11 @@ export class TransactionStrategy extends BaseStrategy {
           continue;
         }
 
-        errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap));
+        const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
+        errors.push(...groupErrors);
+        if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
+          errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+        }
         errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
       }
 
@@ -207,7 +217,11 @@ export class TransactionStrategy extends BaseStrategy {
         });
         continue;
       }
-      errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap));
+      const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
+      errors.push(...groupErrors);
+      if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
+        errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+      }
       errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
     }
 
@@ -410,6 +424,162 @@ export class TransactionStrategy extends BaseStrategy {
     return { errors, rowsChecked };
   }
 
+  // ----------------------------------------------------------------
+  // Group-key pagination (use_group_pagination: true)
+  // ----------------------------------------------------------------
+
+  /**
+   * Alternative to anchor-key streaming for tables where group rows are SCATTERED.
+   *
+   * Instead of streaming rows ordered by id and relying on carry-over to handle split groups,
+   * this method paginates through DISTINCT group key values and fetches all rows per group
+   * in one go — groups are always complete before comparison.
+   *
+   * Reuses the same DB primitives as composite-key mode (getDistinctKeys + streamRowsByKeys)
+   * but without account translation and without temp table caching.
+   *
+   * Limitation: source_filter must filter on the group key column itself.
+   * Column-based filters are not re-applied when streaming rows (see use_group_pagination JSDoc).
+   */
+  private async validateGroupPagination(
+    ctx: ValidationContext,
+  ): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+    const errors: ValidationError[] = [];
+    let rowsChecked = 0;
+    const { commonRule, defRules, affectCodeMap } = ctx;
+    const { source, target } = commonRule.table_info;
+    const tg = commonRule.transaction_grouping!;
+    let sm = commonRule.schema_mappings;
+    const tolerance = commonRule.defaults?.tolerance ?? 0;
+    const oldKeyCol = tg.keys.old;
+    const newKeyCol = tg.keys.new;
+    const targetFetchKey = tg.target_fetch_key ?? newKeyCol;
+    const sourceFilter = commonRule.table_info.source_filter;
+    const GROUP_BATCH = 200;
+
+    this.logger.log(
+      `[TXN-GP] Validating ${source} → ${target} grouped by [${oldKeyCol}] (group-key pagination)`,
+    );
+
+    // ---- Schema check ----
+    const colErrors = await this.checkMissingColumns(source, target, [
+      ...(sm.exact_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.split_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: m.new_cols })),
+      ...(sm.transformed_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+      ...(sm.concat_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
+      ...(sm.formula_matches ?? []).map((m) => ({ oldCols: m.old_cols, newCols: [m.new] })),
+      ...(sm.filtered_sum_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
+    ]);
+    if (colErrors.length > 0) {
+      errors.push(...colErrors);
+      this.logger.warn(`[TXN-GP] ${colErrors.length} column(s) missing — continuing with valid mappings only`);
+      sm = this.filterMappingsAfterSchemaCheck(sm, colErrors);
+    }
+    errors.push(...await this.reportUnmappedColumns(source, target, sm, 'TXN-GP'));
+
+    // ---- Noisy column detection ----
+    const allOldCols = [
+      ...(sm.exact_matches ?? []).map((m) => m.old),
+      ...(sm.split_matches ?? []).map((m) => m.old),
+      ...(sm.concat_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.formula_matches ?? []).flatMap((m) => m.old_cols),
+      ...(sm.filtered_sum_matches ?? []).map((m) => m.old),
+    ];
+    const noisyMap = await this.detectNoisyColumns(source, allOldCols);
+    for (const [col, type] of noisyMap) {
+      if (type !== 'NORMAL') {
+        this.logger.warn(`[TXN-GP] Column [${col}] is ${type} — name-only match`);
+      }
+    }
+
+    // ---- Group-key pagination loop ----
+    // getDistinctKeys paginates sysrefs alphabetically with source_filter applied.
+    // streamRowsByKeys then fetches ALL rows for each batch — no carry-over needed
+    // because groups are always complete (all rows for a sysref in one fetch).
+    let lastGroupKey: string | null = null;
+
+    while (true) {
+      const groupKeys = await this.db.getDistinctKeys(
+        source, oldKeyCol, GROUP_BATCH, lastGroupKey, sourceFilter,
+      );
+      if (groupKeys.length === 0) break;
+
+      // Fetch ALL old rows for this batch of group keys
+      const oldRows: Record<string, unknown>[] = [];
+      await this.db.streamRowsByKeys(source, oldKeyCol, groupKeys, (row) => oldRows.push(row));
+
+      // Fetch ALL new rows for this batch of group keys
+      const newRows: Record<string, unknown>[] = [];
+      await this.db.streamRowsByKeys(target, targetFetchKey, groupKeys, (row) => newRows.push(row));
+
+      // Group old rows by group key
+      const oldGroupMap = new Map<string, Record<string, unknown>[]>();
+      for (const row of oldRows) {
+        const key = this.normalizeKey(row[oldKeyCol], tg.transform_key);
+        if (!key) continue;
+        if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
+        oldGroupMap.get(key)!.push(row);
+        rowsChecked++;
+      }
+
+      // Group new rows by group key
+      const newGroupMap = new Map<string, Record<string, unknown>[]>();
+      for (const row of newRows) {
+        const key = this.normalizeKey(row[newKeyCol], tg.transform_key);
+        if (!key) continue;
+        if (!newGroupMap.has(key)) newGroupMap.set(key, []);
+        newGroupMap.get(key)!.push(row);
+      }
+
+      // Compare each old group against its new counterpart
+      for (const [groupKey, oldGroup] of oldGroupMap) {
+        const newGroup = newGroupMap.get(groupKey) ?? [];
+        if (newGroup.length === 0) {
+          errors.push({
+            errorType: 'ROW_MISSING',
+            groupKey,
+            message: `Transaction group [${groupKey}] found in source but not in target`,
+          });
+          continue;
+        }
+        const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
+        errors.push(...groupErrors);
+        if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
+          errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+        }
+        errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+      }
+
+      // Report extra groups in target not present in source
+      for (const [groupKey] of newGroupMap) {
+        if (!oldGroupMap.has(groupKey)) {
+          errors.push({
+            errorType: 'ROW_MISSING',
+            groupKey,
+            message: `Transaction group [${groupKey}] found in target but not in source (extra row)`,
+          });
+        }
+      }
+
+      lastGroupKey = groupKeys[groupKeys.length - 1];
+      if (groupKeys.length < GROUP_BATCH) break;
+    }
+
+    this.logger.log(`[TXN-GP] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
+    return { errors, rowsChecked };
+  }
+
+  /**
+   * Row-level fingerprint diff — called after validateGroup finds errors.
+   *
+   * Builds a fingerprint for each row by joining the configured column values
+   * with '|', then diffs old vs new as multisets. Unmatched fingerprints are
+   * reported as ROW_MISSING so engineers can see exactly which transaction
+   * (identified by date, amount, etc.) is missing or extra in the group.
+   *
+   * Uses multisets (not sets) so duplicate-fingerprint rows are handled correctly:
+   * if old has 3 rows with the same fingerprint and new has 2, we report 1 missing.
+   */
   private normalizeKey(value: unknown, transformRule?: string): string {
     if (!transformRule || transformRule === 'NONE') return String(value ?? '').trim();
     return TransformUtils.apply(value, transformRule as any) ?? '';

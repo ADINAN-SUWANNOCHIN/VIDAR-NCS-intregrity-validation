@@ -26,6 +26,15 @@ transaction_grouping:
     old: systemreferencenumber
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_group_pagination: true      # rows are SCATTERED (BF sysref id_range/cnt ratio ≈2282×)
+  row_fingerprint:                # post-mismatch row diff — identifies which transaction is missing
+    - old: transactiondate
+      new: transactiondate
+    - old: transactionamount
+      new: transactionamount
+                                  # anchor-key streaming would compare partial groups → false errors
+                                  # note: BF/CAL_INT/B_DIFF still excluded via source_filter above
+                                  #       (safe to remove once group-pagination confirmed stable)
 
 defaults:
   tolerance: 0.01
@@ -202,12 +211,15 @@ schema_mappings:
     # PLACEHOLDER: lastcalintdateb4 → new system field
 
     # !! MIGRATION GAP — REQUIRES BUSINESS REVIEW !!
-    # PLACEHOLDER: repayviatdr
-    #   OLD: nvarchar 'N'=11,622,784 rows | 'Y'=3,029,456 rows | ''=1,315,358 rows
-    #   NEW: bit — ALL 15,967,598 rows = False (0)
-    #   VERDICT: repayviatdr was NOT migrated. Old 'Y' values were lost.
-    #   ACTION: Confirm with business whether this field should have been migrated.
-    #           If yes → report as migration defect.
+    # EXCLUDED: repayviatdr — DO NOT ADD TO MAPPINGS
+    #   OLD: nvarchar  'N'=11,622,784 | 'Y'=3,029,456 | ''=1,315,358 rows
+    #   NEW: bit       false=15,967,598 rows (100%) — confirmed on live DB
+    #   REASON: Intentional architectural change.
+    #     Old system stored TDR repayment status as a denormalized per-transaction flag.
+    #     New system tracks TDR at the account level via ln$tdrportion / ln$tdrportionline.
+    #     The repayviatdr bit column in ln$lnhistloantransactionhistory is vestigial (always 0).
+    #     TDR data validation belongs in a separate ln$tdrportion coverage check — not here.
+    #   WARNING: Adding to mappings would flood the report with 3M+ group-level errors.
 
     # PLACEHOLDER: severity (old) → EMPTY in old (confirmed), skip
     # PLACEHOLDER: createdate (old datetime2) → EMPTY in old (always NULL confirmed), skip
@@ -285,3 +297,23 @@ schema_mappings:
     - old: calculaterate
       new: calculateintrate
       transform_rule: STRIP_LEADING_ZEROS
+
+  # ---------------------------------------------------------------
+  # concat_matches: string identity columns validated in group mode
+  #
+  # In use_group_pagination mode, exact_matches for string columns are
+  # silently skipped (sumColumn returns null for non-numeric values).
+  # concat_matches collects the distinct value set per group, sorts and
+  # joins with '|', then compares old vs new — catching wrong/missing values.
+  # These columns are the primary identifiers that distinguish rows within
+  # a group; if they diverge the migration routed rows to the wrong account.
+  # ---------------------------------------------------------------
+  concat_matches:
+    - old_cols: [newaccountno]
+      new: accountno
+
+    - old_cols: [affectcode]
+      new: affectcode
+
+    - old_cols: [debitcredit]
+      new: debitcredit

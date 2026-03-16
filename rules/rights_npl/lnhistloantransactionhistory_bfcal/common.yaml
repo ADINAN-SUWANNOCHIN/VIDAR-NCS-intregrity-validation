@@ -1,0 +1,50 @@
+# ============================================================
+# rights_npl / lnhistloantransactionhistory — BF/CAL_INT/B_DIFF only
+# TRANSACTION: conv$vinplhistory → ln$lnhistloantransactionhistory
+#
+# PURPOSE: Row count validation for 3 system batch sysrefs that are excluded
+# from the main lnhistloantransactionhistory rule because grouping them by sysref
+# mixes all accounts together (making value comparison meaningless).
+#
+# These 3 sysrefs alone account for ~1.1M rows:
+#   BF       ≈ 804K rows  (beginning-of-period balance carry-forward)
+#   CAL_INT  ≈ 200K rows  (calculated interest batch entries)
+#   B_DIFF   ≈ 110K rows  (balance difference adjustment entries)
+#
+# Validation: COUNT(old) == COUNT(new) per sysref group.
+# Value comparison is intentionally skipped — see def/def001.yaml.
+# ============================================================
+
+table_info:
+  source: "[ncs-conv-aging].dbo.[conv$vinplhistory]"
+  target: "[ncs-npl-aging].dbo.[ln$lnhistloantransactionhistory]"
+  table_type: TRANSACTION
+  source_filter: "systemreferencenumber IN ('BF', 'CAL_INT', 'B_DIFF')"
+
+anchor_key:
+  old: id
+  new: id  # not used for row lookup in group-key pagination mode
+
+transaction_grouping:
+  keys:
+    old: systemreferencenumber
+    new: systemreferenceno
+  target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_group_pagination: true      # only 3 distinct sysrefs — one fetch per group
+
+defaults:
+  tolerance: 0.01
+
+schema_mappings:
+  # Minimal mapping — only the group key.
+  # Value comparison for BF/CAL_INT/B_DIFF is meaningless (all accounts mixed per sysref).
+  # The actual validation is COUNT-based in def/def001.yaml.
+  exact_matches:
+    - old: systemreferencenumber
+      new: systemreferenceno
+
+  # EXCLUDED: repayviatdr (conv$vinplhistory nvarchar 'Y'/'N') — DO NOT ADD TO MAPPINGS
+  #   OLD: 'N'=11,622,784 | 'Y'=3,029,456 | ''=1,315,358 rows in conv$vinplhistory
+  #   NEW: bit = false (0) for ALL rows in ln$lnhistloantransactionhistory
+  #   REASON: Architectural change — TDR status moved to account-level ln$tdrportion.
+  #   See lnhistloantransactionhistory/common.yaml for full investigation notes.
