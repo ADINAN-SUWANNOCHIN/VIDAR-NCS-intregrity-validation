@@ -168,6 +168,7 @@ export class ValidationService {
     );
 
     if (!amountMapping || !commonRule.transaction_grouping) return errors;
+    if (commonRule.skip_aggregate_sum_check) return errors;
 
     const { source, target } = commonRule.table_info;
     const tolerance = commonRule.defaults?.tolerance ?? 0.01;

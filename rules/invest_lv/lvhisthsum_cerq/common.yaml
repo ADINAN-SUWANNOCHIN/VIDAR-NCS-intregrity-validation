@@ -344,37 +344,40 @@ schema_mappings:
         loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
       new: lvdebitotherchargeamount
 
-    # YIELD (ผลตอบแทน)
-    # lthc 25100 = yield debit; lthc 24100/26100 = yield credit; lthc 26200 = yield credit (I3)
+    # YIELD (ผลตอบแทน) — I2 rows redirected via excluded lthc codes
+    # Confirmed: ADC6304-0086 I2/26100/C=105774.47 → lvcredityieldamount ✓
+    # BUG FIX 2026-03-17: removed 26200 (I3/C → lvcreditirramount, not yield)
+    #                     removed I3 from affectcode_in for same reason
     - old: transactionamount
       old_filter:
-        affectcode_in: [I2, I3]
+        affectcode_in: [I2]
         debitcredit: C
-        loantranshostcode_in: ["24100", "26100", "26200"]
+        loantranshostcode_in: ["24100", "26100"]
       new: lvcredityieldamount
 
     - old: transactionamount
       old_filter:
-        affectcode_in: [I2, I3]
+        affectcode_in: [I2]
         debitcredit: D
         loantranshostcode_in: ["25100"]
       new: lvdebityieldamount
 
-    # IRR (อัตราดอกเบี้ยภายใน)
-    # lthc 25200 = IRR debit; lthc 24200 = IRR credit
+    # IRR (อัตราดอกเบี้ยภายใน) — I3 rows redirected via excluded lthc codes
+    # Confirmed: ADC6104-0810 I3/26200/C=31937021120.55 → lvcreditirramount ✓
+    # BUG FIX 2026-03-17: added 26200 to lvcreditirramount (was incorrectly in lvcredityieldamount)
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I3]
+        debitcredit: C
+        loantranshostcode_in: ["24200", "26200"]
+      new: lvcreditirramount
+
     - old: transactionamount
       old_filter:
         affectcode_in: [I3]
         debitcredit: D
         loantranshostcode_in: ["25200"]
       new: lvdebitirramount
-
-    - old: transactionamount
-      old_filter:
-        affectcode_in: [I3]
-        debitcredit: C
-        loantranshostcode_in: ["24200"]
-      new: lvcreditirramount
 
   # ---------------------------------------------------------------
   # lvformat* columns — NOT mapped here (derived, validated implicitly)

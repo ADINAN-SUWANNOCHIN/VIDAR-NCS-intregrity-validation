@@ -234,6 +234,7 @@ export interface CommonRule {
   defaults?: {
     tolerance?: number;
   };
+  skip_aggregate_sum_check?: boolean;
 }
 
 // ---- Def Rule (จาก def.yaml) ----

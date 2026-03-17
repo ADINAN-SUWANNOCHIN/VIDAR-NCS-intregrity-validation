@@ -491,6 +491,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     await insertReq.query(
       `SELECT * INTO [${tempName}] FROM ${tableRef(sourceTable)} WITH (NOLOCK) ${filterClause}`,
     );
+    // nvarchar(MAX) columns cannot be used as index keys in SQL Server.
+    // Alter the sysref column to nvarchar(450) (max indexable width) before creating the index.
+    // This is safe: systemreferenceno values are never close to 450 chars.
+    this.logger.log(`[SrcCache] Normalizing [${sysrefCol}] to NVARCHAR(450) for index compatibility...`);
+    const alterReq = this.pool.request();
+    (alterReq as any).timeout = 0;
+    await alterReq.query(
+      `ALTER TABLE [${tempName}] ALTER COLUMN [${sysrefCol}] NVARCHAR(450)`,
+    );
     this.logger.log(`[SrcCache] Building clustered index on ([${sysrefCol}], [${idCol}])...`);
     const idxReq = this.pool.request();
     (idxReq as any).timeout = 0;

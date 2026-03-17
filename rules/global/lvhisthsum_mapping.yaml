@@ -33,13 +33,15 @@ consolidate_filter:
     - "29400"
 
   # Unknown codes — NOT in transactioncode.json; confirmed excluded from lv$lvhisthsum by DB query
-  unknown_excluded_loantranshostcodes:
-    - "24100"  # affectcode=I2, debitcredit=C — not in transactioncode.json
-    - "25100"  # affectcode=I2, debitcredit=D — not in transactioncode.json
-    - "24200"  # affectcode=I3, debitcredit=C — not in transactioncode.json
-    - "25200"  # affectcode=I3, debitcredit=D — not in transactioncode.json
-    - "26100"  # unknown — not in transactioncode.json
-    - "26200"  # unknown — not in transactioncode.json
+  # These codes are NOT in transactioncode.json, but are confirmed via DB investigation.
+  # They are excluded from lvcredit/lvdebitinterestamount but REDIRECTED to yield/irr columns.
+  yield_irr_redirect_loantranshostcodes:
+    - "24100"  # affectcode=I2, debitcredit=C → lvcredityieldamount (confirmed 2026-03-17)
+    - "26100"  # affectcode=I2, debitcredit=C → lvcredityieldamount (confirmed 2026-03-17)
+    - "25100"  # affectcode=I2, debitcredit=D → lvdebityieldamount  (confirmed 2026-03-17)
+    - "26200"  # affectcode=I3, debitcredit=C → lvcreditirramount   (confirmed 2026-03-17)
+    - "24200"  # affectcode=I3, debitcredit=C → lvcreditirramount   (inferred by symmetry)
+    - "25200"  # affectcode=I3, debitcredit=D → lvdebitirramount    (inferred by symmetry)
 
 # ----------------------------------------------------------------
 # COLUMN MAPPING: (affectcode, debitcredit) → lv$lvhisthsum column
@@ -132,6 +134,42 @@ column_mapping:
     confirmed: false
     evidence: "Same as above — always 0 across entire table"
 
+  # YIELD (ผลตอบแทน) — sourced from "excluded" loantranshostcodes that redirect
+  # I2/I3 rows to yield/irr columns instead of lvcreditinterestamount.
+  # Confirmed via DB investigation 2026-03-17 on sysrefs:
+  #   P5911-005454  (I2/24100/C=22828.02 → lvcredityieldamount=22828.02 ✓)
+  #   ADC6304-0086  (I2/26100/C=105774.47 → lvcredityieldamount=105774.47 ✓)
+  #   ADC6104-0810  (I2/25100/D=31937021120.55 → lvdebityieldamount ✓,
+  #                  I3/26200/C=31937021120.55 → lvcreditirramount ✓)
+  - affectcode: I2
+    debitcredit: C
+    loantranshostcode_in: ["24100", "26100"]
+    lv_column: lvcredityieldamount
+    confirmed: true
+    evidence: "P5911-005454 I2/24100/C=22828.02; ADC6304-0086 I2/26100/C=105774.47"
+
+  - affectcode: I2
+    debitcredit: D
+    loantranshostcode_in: ["25100"]
+    lv_column: lvdebityieldamount
+    confirmed: true
+    evidence: "ADC6104-0810 I2/25100/D=31937021120.55 exact match"
+
+  # IRR (อัตราดอกเบี้ยภายใน)
+  - affectcode: I3
+    debitcredit: C
+    loantranshostcode_in: ["24200", "26200"]
+    lv_column: lvcreditirramount
+    confirmed: true
+    evidence: "ADC6104-0810 I3/26200/C=31937021120.55; 24200 inferred by symmetry (not yet DB-verified)"
+
+  - affectcode: I3
+    debitcredit: D
+    loantranshostcode_in: ["25200"]
+    lv_column: lvdebitirramount
+    confirmed: false
+    evidence: "Inferred from I3+D symmetry; no DB-verified sysref yet"
+
   # UNCONFIRMED — codes present in transactioncode.json consolidate=C but
   # target lv* column not confirmed via DB query.
   # These may go to existing columns or may have no direct lv* mapping.
@@ -175,6 +213,67 @@ column_mapping:
       possible_lv_column: lvcreditprincipleamount / lvdebitprincipleamount
 
 # ----------------------------------------------------------------
+# NULL COLUMNS — confirmed 0 across entire 11.7M row table (2026-03-17)
+# These columns exist in the schema but are never populated.
+# No validation needed or possible.
+# ----------------------------------------------------------------
+null_columns:
+  # Non-lv running balance columns — all zero
+  - principledebit
+  - principlecredit
+  - yielddebit
+  - yieldcredit
+  - irrdebit
+  - irrcredit
+  - interestdebit
+  - interestcredit
+  - gainsettlementdebit
+  - gainsettlementcredit
+  - otherchargedebit
+  - otherchargecredit
+  - penaltyamountdebit
+  - penaltyamountcredit
+  - creditaccrueinterest
+  # tx* columns never populated
+  - txcreditinterest
+  - txdebitinterest
+  - txcreditmiscellaneousexpense
+  - txdebitmiscellaneousexpense
+
+# ----------------------------------------------------------------
+# TX COLUMNS — populated but transformation formula not yet confirmed
+# Sourced from consolidate=C affectcodes (GT, VA, IX, SX, LX, NX, SB, PF, QB, QC).
+# Values are NOT mirrors of lv* columns — independently computed by migration.
+# txcredittaxcostbalance+txcreditintascitratio patterns suggest a payment split
+# (cost basis vs accrual ratio) but exact formula requires migration source code.
+# ----------------------------------------------------------------
+tx_columns_pending:
+  - column: txcredittaxcostbalance
+    total_across_table: 126528605540.70
+    note: "Populated. Possible source: payment principal split (cost basis). Formula unconfirmed."
+  - column: txdebittaxcostbalance
+    total_across_table: 229372520510.32
+    note: "Populated. Formula unconfirmed."
+  - column: txcreditgaintaxbalance
+    total_across_table: 9113188866.14
+    note: "Populated. Possible source: GT (Gain Tax). Formula unconfirmed."
+  - column: txdebitgaintaxbalance
+    total_across_table: 488835716.06
+    note: "Populated. Formula unconfirmed."
+  - column: txcreditotherexpense
+    total_across_table: 5206028288.66
+    note: "Populated. Formula unconfirmed."
+  - column: txdebitotherexpense
+    total_across_table: 7517912129.15
+    note: "Populated. Formula unconfirmed."
+  - column: txcreditintascitratio
+    total_across_table: 120837256691.17
+    note: "Populated. 'intascit' = interest accrual SBT ratio. Possible source: SB (SBT on Accrue Interest). Formula unconfirmed."
+  - column: txdebitintascitratio
+    total_across_table: 2363433471.10
+    note: "Populated. Formula unconfirmed."
+
+# ----------------------------------------------------------------
 # SPECIAL: transactionamount in lv$lvhisthsum new row
 #
 # The new.transactionamount value comes from the OLD row with:
@@ -189,16 +288,24 @@ transactionamount_source:
   note: "consolidate=N so it does not contribute to any lv* column; it sets new.transactionamount directly"
 
 # ----------------------------------------------------------------
-# VALIDATION STRATEGY (for future engine upgrade)
+# VALIDATION STRATEGY
 #
 # Per sysref group, validate each lv* column as:
 #   SUM(old.transactionamount
-#       WHERE loantranshostcode NOT IN <exclude_list>
+#       WHERE loantranshostcode NOT IN <exclude_list>   ← loantranshostcode_not_in
 #         AND affectcode IN <affectcodes_for_column>
 #         AND debitcredit = <C or D>)
 #   = new.<lv_column>
 #
-# Requires engine support for: multi-filter DEF expressions
-# Current engine: single-filter only (affectCodeMap from DEF rules)
-# Status: engine upgrade planned for next phase
+# For yield/irr columns use loantranshostcode_in instead:
+#   SUM(old.transactionamount
+#       WHERE loantranshostcode IN <redirect_list>      ← loantranshostcode_in
+#         AND affectcode IN [I2] or [I3]
+#         AND debitcredit = <C or D>)
+#   = new.<lv_column>
+#
+# Engine status (2026-03-17):
+#   loantranshostcode_not_in — SUPPORTED (filtered_sum_matches)
+#   loantranshostcode_in     — SUPPORTED (filtered_sum_matches, rule.types.ts:94-95)
+#   Both are live in lvhisthsum/common.yaml and lvhisthsum_cerq/common.yaml
 # ----------------------------------------------------------------

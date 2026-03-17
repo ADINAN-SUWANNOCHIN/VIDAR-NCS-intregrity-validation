@@ -30,6 +30,19 @@
 #   runningno — MANUAL_CHECK → runningtxtaxcostbalance; awaiting business confirmation.
 #   keydate — internal migration timestamp.
 #   tempid — migration-generated temp ID (TEMP-XXXXXXXXXX format).
+#
+# NULL_COL (confirmed 0 across entire 11.7M row table — 2026-03-17):
+#   principledebit, principlecredit, yielddebit, yieldcredit, irrdebit, irrcredit,
+#   interestdebit, interestcredit, gainsettlementdebit, gainsettlementcredit,
+#   otherchargedebit, otherchargecredit, penaltyamountdebit, penaltyamountcredit,
+#   creditaccrueinterest, txcreditinterest, txdebitinterest,
+#   txcreditmiscellaneousexpense, txdebitmiscellaneousexpense
+#
+# TX_PENDING (populated but transformation formula not yet confirmed — 2026-03-17):
+#   txcredittaxcostbalance, txdebittaxcostbalance, txcreditgaintaxbalance,
+#   txdebitgaintaxbalance, txcreditotherexpense, txdebitotherexpense,
+#   txcreditintascitratio, txdebitintascitratio
+#   → See rules/global/lvhisthsum_mapping.yaml § tx_columns_pending for totals and notes.
 # ============================================================
 
 table_info:
@@ -56,6 +69,10 @@ transaction_grouping:
 
 defaults:
   tolerance: 0.01
+
+# affectcode is always NULL in lv$lvhisthsum (new table) — querySumByGroup returns empty map
+# → every old affectcode would show SUM mismatch (9 false positives). Skip aggregate check.
+skip_aggregate_sum_check: true
 
 schema_mappings:
 
@@ -251,7 +268,42 @@ schema_mappings:
         loantranshostcode_not_in: ["80000","81000","82100","90000","92090","99000","21300","21400","29300","29400","24100","25100","24200","25200","26100","26200"]
       new: lvdebitotherchargeamount
 
+    # YIELD (ผลตอบแทน) — I2 rows redirected from lvcreditinterestamount via excluded lthc codes
+    # Confirmed: P5911-005454 I2/24100/C=22828.02 → lvcredityieldamount=22828.02 ✓
+    #            ADC6304-0086 I2/26100/C=105774.47 → lvcredityieldamount=105774.47 ✓
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I2]
+        debitcredit: C
+        loantranshostcode_in: ["24100", "26100"]
+      new: lvcredityieldamount
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I2]
+        debitcredit: D
+        loantranshostcode_in: ["25100"]
+      new: lvdebityieldamount
+
+    # IRR (อัตราดอกเบี้ยภายใน) — I3 rows redirected via excluded lthc codes
+    # Confirmed: ADC6104-0810 I3/26200/C=31937021120.55 → lvcreditirramount ✓
+    #            24200 inferred by symmetry (not yet DB-verified)
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I3]
+        debitcredit: C
+        loantranshostcode_in: ["24200", "26200"]
+      new: lvcreditirramount
+
+    - old: transactionamount
+      old_filter:
+        affectcode_in: [I3]
+        debitcredit: D
+        loantranshostcode_in: ["25200"]
+      new: lvdebitirramount
+
     # MISC CHARGE — always 0 across entire table (no data), included for completeness
+    # lvdebitmischargeamount also always 0 (MF/D — same evidence as credit side)
     # - old: transactionamount
     #   old_filter:
     #     affectcode_in: [MF]
