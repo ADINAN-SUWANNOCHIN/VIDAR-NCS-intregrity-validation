@@ -119,6 +119,27 @@ export class PresetService {
   }
 
   /**
+   * Resolves every table across every module and every category.
+   * Used by POST /validation/run/all.
+   */
+  resolveAllTables(): PresetTableEntry[] {
+    if (!fs.existsSync(this.presetsDir)) {
+      this.logger.warn(`Presets directory not found: ${this.presetsDir}`);
+      return [];
+    }
+
+    const modules = fs
+      .readdirSync(this.presetsDir)
+      .filter((f) => fs.statSync(path.join(this.presetsDir, f)).isDirectory());
+
+    const result: PresetTableEntry[] = [];
+    for (const mod of modules) {
+      result.push(...this.resolveTablesForModule(mod));
+    }
+    return result;
+  }
+
+  /**
    * Resolves all tables across every category for an entire module.
    * Used by POST /validation/run/preset/:module to run everything in one shot.
    *
