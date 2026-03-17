@@ -122,6 +122,53 @@ export class ValidationController {
   }
 
   /**
+   * POST /validation/run/preset/:module
+   * Run ALL categories for an entire module in one shot.
+   * e.g. POST /validation/run/preset/npa  → runs rights + eir for npa
+   *      POST /validation/run/preset/npl  → runs rights for npl
+   *      POST /validation/run/preset/invest_lv → runs all invest_lv tables
+   *
+   * Optional body:
+   * {
+   *   "job_name": "NPA_Full_Run",   — label for this job (default: MODULE_ALL)
+   *   "def_list": ["def001"]        — apply def rules to all tables (omit = load all defs)
+   * }
+   */
+  @Post('run/preset/:module')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async runPresetModule(
+    @Param('module') module: string,
+    @Body() body: RunPresetDto,
+  ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
+    const entries = this.presetService.resolveTablesForModule(module);
+
+    if (entries.length === 0) {
+      throw new NotFoundException(
+        `No preset found for module [${module}]. Use GET /validation/presets to see available options.`,
+      );
+    }
+
+    const dto: ValidationRequestDto = {
+      job_name: body.job_name ?? `${module.toUpperCase()}_ALL`,
+      tables: entries.map((e) => ({
+        table_name: e.table_name,
+        rule_path: e.rule_path,
+        def_list: body.def_list,
+      })),
+    };
+
+    const jobId = await this.validationService.startJob(dto);
+    const tableNames = entries.map((e) => e.table_name);
+
+    return {
+      jobId,
+      queued: entries.length,
+      tables: tableNames,
+      message: `Queued ${entries.length} table(s). Use GET /validation/status/${jobId} to track progress.`,
+    };
+  }
+
+  /**
    * POST /validation/run/preset/:module/:category
    * Run all or a filtered subset of tables from a preset.
    *
