@@ -70,7 +70,17 @@ export class ValidationController {
   }
 
   /**
+   * GET /validation/jobs
+   * List all jobs (most recent first). Survives restarts — loaded from jobs.json on startup.
+   */
+  @Get('jobs')
+  listJobs() {
+    return this.jobService.listJobs();
+  }
+
+  /**
    * GET /validation/status/:jobId
+   * Returns job record including inline summary table when status is DONE.
    */
   @Get('status/:jobId')
   async getStatus(@Param('jobId') jobId: string): Promise<JobRecord> {

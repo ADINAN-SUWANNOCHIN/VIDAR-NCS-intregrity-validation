@@ -5,6 +5,14 @@ export enum JobStatus {
   FAILED = 'FAILED',
 }
 
+export interface TableSummary {
+  tableName: string;
+  rowsChecked: number;
+  totalErrors: number;
+  status: 'PASS' | 'FAIL';
+  timeSpentSec: number;
+}
+
 export interface JobRecord {
   jobId: string;
   label?: string;
@@ -16,4 +24,5 @@ export interface JobRecord {
   finishedAt?: Date;
   reportPaths?: string[];
   errorMessage?: string;
+  summary?: TableSummary[];   // inline results — populated when DONE
 }
