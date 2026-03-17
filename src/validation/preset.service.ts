@@ -119,6 +119,32 @@ export class PresetService {
   }
 
   /**
+   * Resolves all tables across every category for an entire module.
+   * Used by POST /validation/run/preset/:module to run everything in one shot.
+   *
+   * @param module  e.g. "npa" — runs rights + eir + any future categories
+   */
+  resolveTablesForModule(module: string): PresetTableEntry[] {
+    const moduleDir = path.join(this.presetsDir, module.toLowerCase());
+    if (!fs.existsSync(moduleDir)) {
+      this.logger.warn(`Module preset directory not found: ${moduleDir}`);
+      return [];
+    }
+
+    const files = fs
+      .readdirSync(moduleDir)
+      .filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'));
+
+    const result: PresetTableEntry[] = [];
+    for (const file of files) {
+      const category = path.basename(file, path.extname(file));
+      const entries = this.resolveTablesForRun(module, category);
+      result.push(...entries);
+    }
+    return result;
+  }
+
+  /**
    * Resolves which tables to run based on optional filters.
    *
    * @param module     e.g. "npa"
