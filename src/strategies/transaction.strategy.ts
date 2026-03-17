@@ -339,7 +339,7 @@ export class TransactionStrategy extends BaseStrategy {
     // This replaces repeated full-table IN-clause scans (16K+ for RQ sysrefs)
     // with a single upfront scan + indexed seeks for all subsequent lookups.
     // Requires only SELECT on target — temp tables are created in tempdb (always writable).
-    const tempName = `##dv_ck_${process.pid}_${Date.now()}`;
+    const tempName = `##dv_ck_${process.pid}_${DatabaseService.nextCacheSeq()}`;
     await this.db.createTargetCache(target, tempName, targetFetchKey, ck.new_col);
 
     // Paginate through distinct sysrefs using source_filter
@@ -673,8 +673,8 @@ export class TransactionStrategy extends BaseStrategy {
     // chunk (ORDER BY sysref on unindexed column = hours), we pay one upfront INSERT (~5-20 min)
     // then every fetchChunk becomes a fast index seek (milliseconds).
     // sourceFilter is baked into the cache so no filter needed in subsequent fetchChunk calls.
-    const tempName = `##dv_src_${process.pid}_${Date.now()}`;
-    await this.db.createSourceCache(source, tempName, oldKeyCol, anchorKeyOld, sourceFilter ?? undefined);
+    const tempName = `##dv_src_${process.pid}_${DatabaseService.nextCacheSeq()}`;
+    await this.db.createSourceCache(source, tempName, oldKeyCol, anchorKeyOld, sourceFilter);
 
     // ---- Sysref-sorted carry-over loop ----
     // No anchor key uniqueness check — sysref is not unique per row.
