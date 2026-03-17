@@ -155,12 +155,13 @@ For each table in the job, the engine calls:
 
 | `table_type` | Strategy class | Used for |
 |---|---|---|
-| `MASTER` | `MasterStrategy` | 1:1 row-by-row comparison — IDs preserved through migration |
-| `TRANSACTION` | `TransactionStrategy` | Group-based comparison — IDs NOT preserved, grouped by sysref |
-| `MULTIPLE` | `MultipleStrategy` | N old source tables → 1 new target table |
-| `UNION` | `UnionStrategy` | Multiple old sources, each maps to a disjoint subset of the new target |
-| `SPLIT` | `SplitStrategy` | 1 old table → split across N new tables |
+| `MASTER` | `MasterStrategy` | 1:1 row mapping — each old row has exactly one new row identified by a preserved unique business key (e.g. account number). IDs are NOT preserved (regenerated in new system). Column names may change, columns may merge, rows may restructure. |
+| `TRANSACTION` | `TransactionStrategy` | Group-based comparison — IDs NOT preserved, rows grouped by sysref and compared as aggregates |
+| `MULTIPLE` | `MultipleStrategy` | N old source tables → N new target tables (N:N). N:1 is a common special case. Each source–target pair validated independently. |
+| `UNION` | `UnionStrategy` | N old sources → 1 new target, non-overlapping groups (each source owns a distinct subset of the target) |
+| `SPLIT` | `SplitStrategy` | 1 old table → N new tables |
 | `HEADER` | `HeaderStrategy` | Long-to-wide pivot (H-table suffix format) |
+| `ASSOCIATE` | `MasterStrategy` | 1:1 key comparison, same engine as MASTER |
 
 After the strategy runs, `ValidationService` runs an **independent aggregate SUM cross-check** on top (§22). This is separate from and does not depend on the strategy.
 
@@ -327,7 +328,7 @@ Finds which affect codes are present in a group of rows. Handles multiple possib
 
 ## 8. MasterStrategy — Row-by-Row with Worker Threads
 
-Used for tables where IDs are preserved through migration (anchor_key old = anchor_key new, one row maps to exactly one row).
+Used for tables with a 1:1 row structure — each old row has exactly one corresponding new row. IDs are NOT preserved (auto-increment is regenerated in the new system same as all other table types). The anchor key must be a unique business key that survived the migration intact (e.g. account number, contract number) — not the auto-increment `id`. Column names may change, columns may merge, and row structure may differ between old and new.
 
 ### Step 1: Schema check + noisy column detection
 

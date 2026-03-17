@@ -32,9 +32,9 @@ Set in `table_info.table_type`:
 
 | Type | Description |
 |---|---|
-| `MASTER` | 1:1 row comparison keyed by unique anchor column |
+| `MASTER` | 1:1 row mapping — each old row has exactly one new row identified by a preserved unique business key. IDs not preserved (regenerated). Column names/structure may differ. |
 | `TRANSACTION` | N old rows share a group key (sysref). Compare group-level aggregates. |
-| `MULTIPLE` | N old source tables → 1 new target. Each source pair validated independently. |
+| `MULTIPLE` | N old source tables → N new target tables (N:N). N:1 is a common special case. Each source–target pair validated independently. |
 | `UNION` | N old tables → 1 new target, non-overlapping groups. |
 | `SPLIT` | 1 old table → N new tables. |
 | `HEADER` | Long format → wide format (pivot). |
