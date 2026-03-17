@@ -12,6 +12,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DatabaseService.name);
   private pool: sql.ConnectionPool;
 
+  /**
+   * Monotonically increasing counter for unique temp table names.
+   * Date.now() alone is not sufficient — two concurrent jobs processed within
+   * the same millisecond get the same timestamp, causing name collision and
+   * one job silently dropping the other's temp table.
+   */
+  private static cacheSeq = 0;
+  static nextCacheSeq(): number { return ++DatabaseService.cacheSeq; }
+
   constructor(private readonly config: ConfigService) {}
 
   async onModuleInit() {
@@ -412,11 +421,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
     );
     this.logger.log(`[TempCache] Copying ${sourceTable} → [${tempName}] (full scan, once)...`);
-    await this.pool.request().query(
+    // Override requestTimeout to unlimited for this query — large tables (15M+ rows) can
+    // take 5–30 min server-side for the SELECT INTO + clustered index build.
+    // The pool default (30 min) may not be enough; 0 = no limit.
+    const insertReq = this.pool.request();
+    (insertReq as any).timeout = 0; // unlimited — large-table SELECT INTO can exceed 30 min default
+    await insertReq.query(
       `SELECT * INTO [${tempName}] FROM ${tableRef(sourceTable)} WITH (NOLOCK)`,
     );
     this.logger.log(`[TempCache] Building index on ([${primaryIndexCol}], [${secondaryIndexCol}])...`);
-    await this.pool.request().query(
+    const idxReq = this.pool.request();
+    (idxReq as any).timeout = 0;
+    await idxReq.query(
       `CREATE CLUSTERED INDEX [ix_dv_ck] ON [${tempName}] ([${primaryIndexCol}], [${secondaryIndexCol}])`,
     );
     this.logger.log(`[TempCache] Ready: [${tempName}]`);
@@ -469,11 +485,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
     );
     this.logger.log(`[SrcCache] Copying ${sourceTable} → [${tempName}] (full scan, once)...`);
-    await this.pool.request().query(
+    // Override requestTimeout to unlimited — 15M-row INSERT + index build can take 5–30 min.
+    const insertReq = this.pool.request();
+    (insertReq as any).timeout = 0; // unlimited — large-table SELECT INTO can exceed 30 min default
+    await insertReq.query(
       `SELECT * INTO [${tempName}] FROM ${tableRef(sourceTable)} WITH (NOLOCK) ${filterClause}`,
     );
     this.logger.log(`[SrcCache] Building clustered index on ([${sysrefCol}], [${idCol}])...`);
-    await this.pool.request().query(
+    const idxReq = this.pool.request();
+    (idxReq as any).timeout = 0;
+    await idxReq.query(
       `CREATE CLUSTERED INDEX [ix_dv_src] ON [${tempName}] ([${sysrefCol}], [${idCol}])`,
     );
     this.logger.log(`[SrcCache] Ready: [${tempName}]`);

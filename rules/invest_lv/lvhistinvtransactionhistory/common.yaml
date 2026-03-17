@@ -248,7 +248,7 @@ schema_mappings:
   # joins with '|', then compares old vs new — catching wrong/missing values.
   # ---------------------------------------------------------------
   concat_matches:
-    - old_cols: [accountno]
+    - old_cols: [newaccountno]   # newaccountno = migrated account ID → matches lvaccountno in new table
       new: lvaccountno
 
     - old_cols: [affectcode]

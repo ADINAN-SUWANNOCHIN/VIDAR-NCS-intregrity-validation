@@ -643,8 +643,8 @@ export class MultipleStrategy extends BaseStrategy {
         // Eliminates repeated full-table sorts per paginated chunk (ECONNRESET root cause).
         // srcFilter is baked into the cache so no filter is needed in subsequent fetchChunk calls.
         if (tg.use_sysref_sort) {
-          const tempName = `##dv_src_${process.pid}_${Date.now()}`;
-          await this.db.createSourceCache(srcTable, tempName, srcKeyCol, commonRule.anchor_key.old, srcFilter ?? undefined);
+          const tempName = `##dv_src_${process.pid}_${DatabaseService.nextCacheSeq()}`;
+          await this.db.createSourceCache(srcTable, tempName, srcKeyCol, commonRule.anchor_key.old, srcFilter);
           let lastKey: unknown = null;
           let carryOld = new Map<string, Record<string, unknown>[]>();
           let carryNew = new Map<string, Record<string, unknown>[]>();
