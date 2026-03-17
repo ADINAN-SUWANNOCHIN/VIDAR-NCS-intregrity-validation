@@ -27,7 +27,7 @@ spec:
               name: api
           resources:
             limits:
-              memory: "800Mi"
+              memory: "3000Mi"
               cpu: "800m"
             requests:
               memory: "500Mi"
