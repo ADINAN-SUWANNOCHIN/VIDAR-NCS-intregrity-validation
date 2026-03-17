@@ -129,7 +129,16 @@ export class ValidationService {
 
     // ---- เขียน reports ----
     const reportPaths = await this.reportService.writeReports(jobId, results);
-    this.jobService.complete(jobId, reportPaths);
+
+    const summary = results.map((r) => ({
+      tableName: r.tableName,
+      rowsChecked: r.rowsChecked,
+      totalErrors: r.total,
+      status: (r.fail === 0 && r.missing === 0 ? 'PASS' : 'FAIL') as 'PASS' | 'FAIL',
+      timeSpentSec: parseFloat((r.timeSpent / 1000).toFixed(2)),
+    }));
+
+    this.jobService.complete(jobId, reportPaths, summary);
     this.logger.log(`[Job:${jobId}] All done. Reports: ${reportPaths.join(', ')}`);
   }
 
