@@ -639,15 +639,19 @@ export class MultipleStrategy extends BaseStrategy {
         const noisyMap = await this.detectNoisyColumns(srcTable, allOldCols);
 
         // ---- Sysref-sort mode (use_sysref_sort: true) ----
-        // Page old table sorted by sysref (srcKeyCol) — eliminates scatter, carry-over at boundary.
-        // ~10× fewer DB round-trips vs use_group_pagination (1 scan per chunk vs 2 per batch).
+        // Source cache: copy srcTable → temp table with clustered index on (sysref, id).
+        // Eliminates repeated full-table sorts per paginated chunk (ECONNRESET root cause).
+        // srcFilter is baked into the cache so no filter is needed in subsequent fetchChunk calls.
         if (tg.use_sysref_sort) {
+          const tempName = `##dv_src_${process.pid}_${Date.now()}`;
+          await this.db.createSourceCache(srcTable, tempName, srcKeyCol, commonRule.anchor_key.old, srcFilter ?? undefined);
           let lastKey: unknown = null;
           let carryOld = new Map<string, Record<string, unknown>[]>();
           let carryNew = new Map<string, Record<string, unknown>[]>();
 
+          try {
           while (true) {
-            const oldChunk = await this.db.fetchChunk(srcTable, srcKeyCol, chunkSize, lastKey, srcFilter);
+            const oldChunk = await this.db.fetchChunk(tempName, srcKeyCol, chunkSize, lastKey);
             if (oldChunk.length === 0) break;
 
             const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
@@ -723,6 +727,9 @@ export class MultipleStrategy extends BaseStrategy {
             if (!carryOld.has(groupKey)) {
               errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row in carry)` });
             }
+          }
+          } finally {
+            await this.db.dropSourceCache(tempName);
           }
 
           continue; // skip anchor-key streaming for this pair

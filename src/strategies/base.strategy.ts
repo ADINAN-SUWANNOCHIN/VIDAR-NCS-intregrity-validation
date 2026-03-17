@@ -144,27 +144,47 @@ export abstract class BaseStrategy {
     const result = new Map<string, NoisyColumnType>();
     if (columns.length === 0) return result;
 
-    let sample: Record<string, unknown>[];
-    try {
-      sample = await this.db.sampleRows(table, 1000);
-    } catch (e: unknown) {
-      this.logger.warn(
-        `[noisy-col] sampleRows failed for [${table}] — all columns treated as NORMAL. Cause: ${(e as Error)?.message ?? String(e)}`,
-      );
-      columns.forEach((c) => result.set(c, 'NORMAL'));
-      return result;
-    }
+    const tRef = tableRef(table);
 
     for (const col of columns) {
-      const values = sample.map((r) => r[col]);
+      try {
+        // Check 1: does any non-null value exist?
+        const nonNullRows = await this.db.query<Record<string, unknown>>(
+          `SELECT TOP 1 [${col}] as v FROM ${tRef} WHERE [${col}] IS NOT NULL`,
+        );
+        if (nonNullRows.length === 0) {
+          result.set(col, 'NULL');
+          continue;
+        }
 
-      if (TransformUtils.isNullColumn(values)) {
-        result.set(col, 'NULL');
-      } else if (TransformUtils.isBooleanColumn(values)) {
-        result.set(col, 'BOOLEAN');
-      } else if (TransformUtils.isZeroColumn(values)) {
-        result.set(col, 'ZERO');
-      } else {
+        // Check 2: does any non-zero, non-empty value exist?
+        // Covers numeric 0, string '0', and empty string ''
+        // Use CAST to nvarchar throughout — avoids implicit int conversion errors on string columns.
+        const nonZeroRows = await this.db.query<Record<string, unknown>>(
+          `SELECT TOP 1 [${col}] as v FROM ${tRef} ` +
+          `WHERE [${col}] IS NOT NULL AND CAST([${col}] AS NVARCHAR(MAX)) NOT IN ('0', '')`,
+        );
+        if (nonZeroRows.length === 0) {
+          result.set(col, 'ZERO');
+          continue;
+        }
+
+        // Check 3: are all values boolean-like (0/1 only)?
+        const nonBoolRows = await this.db.query<Record<string, unknown>>(
+          `SELECT TOP 1 [${col}] as v FROM ${tRef} ` +
+          `WHERE [${col}] IS NOT NULL AND CAST([${col}] AS NVARCHAR(MAX)) NOT IN ('0', '1', 'true', 'false')`,
+        );
+        if (nonBoolRows.length === 0) {
+          result.set(col, 'BOOLEAN');
+          continue;
+        }
+
+        result.set(col, 'NORMAL');
+      } catch (e: unknown) {
+        // Column type may not support the cast — treat as NORMAL (safe default: compare it)
+        this.logger.warn(
+          `[noisy-col] Check failed for [${col}] in [${table}] — treating as NORMAL. Cause: ${(e as Error)?.message ?? String(e)}`,
+        );
         result.set(col, 'NORMAL');
       }
     }

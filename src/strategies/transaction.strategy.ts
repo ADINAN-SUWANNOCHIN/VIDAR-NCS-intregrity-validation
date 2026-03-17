@@ -626,6 +626,8 @@ export class TransactionStrategy extends BaseStrategy {
     const targetFetchKey = tg.target_fetch_key ?? newKeyCol;
     const sourceFilter = commonRule.table_info.source_filter;
 
+    const anchorKeyOld = commonRule.anchor_key.old;
+
     this.logger.log(`[TXN-SS] Validating ${source} → ${target} grouped by [${oldKeyCol}] (sysref-sort)`);
 
     // ---- Schema check ----
@@ -665,15 +667,25 @@ export class TransactionStrategy extends BaseStrategy {
       if (type !== 'NORMAL') this.logger.warn(`[TXN-SS] Column [${col}] is ${type} — name-only match`);
     }
 
+    // ---- Source cache ----
+    // Copy source table into a temp table with a clustered index on (sysref, id).
+    // This eliminates the ECONNRESET problem: instead of re-sorting 15M rows per paginated
+    // chunk (ORDER BY sysref on unindexed column = hours), we pay one upfront INSERT (~5-20 min)
+    // then every fetchChunk becomes a fast index seek (milliseconds).
+    // sourceFilter is baked into the cache so no filter needed in subsequent fetchChunk calls.
+    const tempName = `##dv_src_${process.pid}_${Date.now()}`;
+    await this.db.createSourceCache(source, tempName, oldKeyCol, anchorKeyOld, sourceFilter ?? undefined);
+
     // ---- Sysref-sorted carry-over loop ----
     // No anchor key uniqueness check — sysref is not unique per row.
-    // fetchChunk uses sysref as the keyset cursor → rows arrive in sysref order.
+    // fetchChunk against temp table uses clustered sysref index → O(1) per chunk.
     let lastSysref: unknown = null;
     let carryOld = new Map<string, Record<string, unknown>[]>();
     let carryNew = new Map<string, Record<string, unknown>[]>();
 
+    try {
     while (true) {
-      const oldChunk = await this.db.fetchChunk(source, oldKeyCol, chunkSize, lastSysref, sourceFilter);
+      const oldChunk = await this.db.fetchChunk(tempName, oldKeyCol, chunkSize, lastSysref);
       if (oldChunk.length === 0) break;
 
       const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
@@ -751,6 +763,9 @@ export class TransactionStrategy extends BaseStrategy {
       if (!carryOld.has(groupKey)) {
         errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in target but not in source (extra row at chunk boundary)` });
       }
+    }
+    } finally {
+      await this.db.dropSourceCache(tempName);
     }
 
     this.logger.log(`[TXN-SS] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);

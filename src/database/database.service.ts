@@ -325,7 +325,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         : `WHERE [${keyColumn}] > @lastKey ${filterClause}`;
 
     if (lastKey !== null) {
-      request.input('lastKey', sql.NVarChar, lastKey);
+      // Use bindLastKey to preserve the correct SQL type for the cursor value.
+      // Forcing NVarChar on a numeric key column causes string-comparison ordering ('9' > '10')
+      // which breaks alphabetic pagination — same issue fixed in fetchChunk via bindLastKey.
+      this.bindLastKey(request, lastKey);
     }
 
     const result = await request.query(`
@@ -431,6 +434,63 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[TempCache] Dropped [${tempName}]`);
     } catch (e: any) {
       this.logger.warn(`[TempCache] Failed to drop [${tempName}]: ${e.message}`);
+    }
+  }
+
+  /**
+   * Copies a source (old) table into a global temp table with a clustered index on
+   * (sysrefCol, idCol). Used by sysref-sort validation to eliminate scatter without
+   * repeatedly sorting the full table per paginated chunk.
+   *
+   * Why this solves ECONNRESET:
+   *   The problem: ORDER BY sysref on an unindexed 15M-row old table forces SQL Server to
+   *   full-scan + sort ALL rows for every FETCH NEXT chunk. 3000 chunks × one full sort each
+   *   = hours. SQL Server kills the idle-appearing connection mid-sort → ECONNRESET.
+   *
+   *   This fix: one single INSERT INTO SELECT copies the entire table to tempdb in one
+   *   server-side operation (no client data transfer per page). After that, fetchChunk on
+   *   the temp table uses the clustered sysref index → O(1) seek per chunk, milliseconds each.
+   *   Total: ~5-20 min one-time INSERT + seconds per chunk vs hours per chunk.
+   *
+   * An optional filter (source_filter from common.yaml) limits which rows are copied so
+   * excluded rows (BF, CAL_INT, B_DIFF) are never in the cache.
+   *
+   * Permissions: only requires SELECT on sourceTable — tempdb is always writable by all logins.
+   */
+  async createSourceCache(
+    sourceTable: string,
+    tempName: string,
+    sysrefCol: string,
+    idCol: string,
+    filter?: string,
+  ): Promise<void> {
+    const filterClause = filter ? `WHERE (${filter})` : '';
+    await this.pool.request().query(
+      `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
+    );
+    this.logger.log(`[SrcCache] Copying ${sourceTable} → [${tempName}] (full scan, once)...`);
+    await this.pool.request().query(
+      `SELECT * INTO [${tempName}] FROM ${tableRef(sourceTable)} WITH (NOLOCK) ${filterClause}`,
+    );
+    this.logger.log(`[SrcCache] Building clustered index on ([${sysrefCol}], [${idCol}])...`);
+    await this.pool.request().query(
+      `CREATE CLUSTERED INDEX [ix_dv_src] ON [${tempName}] ([${sysrefCol}], [${idCol}])`,
+    );
+    this.logger.log(`[SrcCache] Ready: [${tempName}]`);
+  }
+
+  /**
+   * Drops the global temp table created by createSourceCache.
+   * Called in a finally block so it always runs even if validation throws.
+   */
+  async dropSourceCache(tempName: string): Promise<void> {
+    try {
+      await this.pool.request().query(
+        `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
+      );
+      this.logger.log(`[SrcCache] Dropped [${tempName}]`);
+    } catch (e: any) {
+      this.logger.warn(`[SrcCache] Failed to drop [${tempName}]: ${e.message}`);
     }
   }
 }
