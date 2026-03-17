@@ -1,0 +1,122 @@
+# ============================================================
+# def001 — Transaction Pivot Integrity Check
+# Scope: rights_npa / lahisthloantransactionhistoryh
+#
+# Validates that affectcode-based amounts from conv$vinpahistory
+# were correctly pivoted into la$lahisthloantransactionhistoryh.
+#
+# Row restructuring pattern (confirmed from DB investigation):
+#   OLD: N rows with different affectcodes (PP, I1, QQ) per sysref
+#   NEW: 2 rows per sysref (H table):
+#     Row 1 (debit row):  debitinterestamount   = I1/D
+#     Row 2 (credit row): creditprincipleamount = PP/C
+#                         creditinterestamount  = I1/C
+#                         transactionamount     = QQ/C
+#
+# Affectcode → new column mapping:
+#   PP / debitcredit=C → creditprincipleamount
+#   I1 / debitcredit=C → creditinterestamount
+#   I1 / debitcredit=D → debitinterestamount
+#   QQ / debitcredit=C → transactionamount
+#
+# Trigger conditions prevent steps from running when the source
+# sysref does not contain the required affectcodes (e.g. interest-only
+# transactions have no PP row → skip PP check).
+#
+# Step 5 is a balance check (no old-side dependency):
+#   creditinterestamount == debitinterestamount
+#   (double-entry ledger: each interest transaction appears in both rows)
+# ============================================================
+
+def_id: def001
+target_scope: transaction_group
+
+trigger_condition:
+  must_have_any: [PP, I1, QQ]
+
+actions:
+  # -------------------------------------------------------
+  # Step 1: PP/C → creditprincipleamount
+  # SUM of transactionamount where affectcode=PP AND debitcredit=C
+  # must equal SUM(new.creditprincipleamount)
+  # -------------------------------------------------------
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [PP]
+    variables:
+      val_pp_credit: "SUM(old.transactionamount[affectcode=PP][debitcredit=C])"
+      val_credit_principle: "SUM(new.creditprincipleamount)"
+    condition: "val_pp_credit == val_credit_principle"
+    error_message: >
+      PP/C not correctly pivoted to creditprincipleamount.
+      old.transactionamount[PP/C]={val_pp_credit}, new.creditprincipleamount={val_credit_principle}.
+
+  # -------------------------------------------------------
+  # Step 2: I1/C → creditinterestamount
+  # SUM of transactionamount where affectcode=I1 AND debitcredit=C
+  # must equal SUM(new.creditinterestamount)
+  # -------------------------------------------------------
+  - step: "2"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [I1]
+    variables:
+      val_i1_credit: "SUM(old.transactionamount[affectcode=I1][debitcredit=C])"
+      val_credit_interest: "SUM(new.creditinterestamount)"
+    condition: "val_i1_credit == val_credit_interest"
+    error_message: >
+      I1/C not correctly pivoted to creditinterestamount.
+      old.transactionamount[I1/C]={val_i1_credit}, new.creditinterestamount={val_credit_interest}.
+
+  # -------------------------------------------------------
+  # Step 3: I1/D → debitinterestamount
+  # SUM of transactionamount where affectcode=I1 AND debitcredit=D
+  # must equal SUM(new.debitinterestamount)
+  # -------------------------------------------------------
+  - step: "3"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [I1]
+    variables:
+      val_i1_debit: "SUM(old.transactionamount[affectcode=I1][debitcredit=D])"
+      val_debit_interest: "SUM(new.debitinterestamount)"
+    condition: "val_i1_debit == val_debit_interest"
+    error_message: >
+      I1/D not correctly pivoted to debitinterestamount.
+      old.transactionamount[I1/D]={val_i1_debit}, new.debitinterestamount={val_debit_interest}.
+
+  # -------------------------------------------------------
+  # Step 4: QQ/C → transactionamount
+  # SUM of transactionamount where affectcode=QQ AND debitcredit=C
+  # must equal SUM(new.transactionamount)
+  # -------------------------------------------------------
+  - step: "4"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [QQ]
+    variables:
+      val_qq_credit: "SUM(old.transactionamount[affectcode=QQ][debitcredit=C])"
+      val_tx_amount: "SUM(new.transactionamount)"
+    condition: "val_qq_credit == val_tx_amount"
+    error_message: >
+      QQ/C not correctly pivoted to transactionamount.
+      old.transactionamount[QQ/C]={val_qq_credit}, new.transactionamount={val_tx_amount}.
+
+  # -------------------------------------------------------
+  # Step 5: Double-entry self-balance check
+  # For every sysref group, credit and debit interest must be equal
+  # (balanced ledger: I1/C row and I1/D row carry the same amount)
+  # -------------------------------------------------------
+  - step: "5"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [I1]
+    variables:
+      val_credit: "SUM(new.creditinterestamount)"
+      val_debit: "SUM(new.debitinterestamount)"
+    condition: "val_credit == val_debit"
+    error_message: >
+      H table interest ledger is unbalanced for this group.
+      SUM(creditinterestamount)={val_credit} != SUM(debitinterestamount)={val_debit}.
+      Unbalanced double-entry indicates missing or duplicate H row.

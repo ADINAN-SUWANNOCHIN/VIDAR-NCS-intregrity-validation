@@ -54,6 +54,17 @@ transaction_grouping:
     old: systemreferencenumber
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_sysref_sort: true         # CONFIRMED SCATTERED: conv$vinpahistory 99.8% groups scattered (ratio 176M×)
+                                  # carry-over streaming produces false VALUE_MISMATCH for partial groups
+  row_fingerprint:
+    - old: affectcode
+      new: affectcode
+    - old: debitcredit
+      new: debitcredit
+    - old: transactionamount
+      new: transactionamount
+    - old: transactiondate
+      new: transactiondate
 
 defaults:
   tolerance: 0.01   # allow 0.01 rounding difference on decimal amounts

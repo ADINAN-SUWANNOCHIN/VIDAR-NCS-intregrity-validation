@@ -36,9 +36,10 @@ table_info:
   source: "[ncs-conv-aging].dbo.[conv$vinpllvhistory]"
   target: "[ncs-npl-aging].dbo.[lv$lvhisthsum]"
   table_type: TRANSACTION
-  # Only P-prefix (P6xxx) and ADC-prefix rows from vinpllvhistory land in lvhisthsum.
-  # Other prefixes (CE, TD, INT, RQ, ZER, etc.) go to lvhistinvtransactionhistory only.
-  # Without this filter all 18M rows are processed → ROW_MISSING flood for ~11M non-P groups.
+  # P-prefix and ADC-prefix: accountno value = lvaccountno value (direct, no cithistory translation).
+  # All other batch prefixes (CE, RQ, TD, IN, REV, AE, TMB, IR) use cithistory translation
+  # and are validated by the separate lvhisthsum_cerq rule.
+  # Z-prefix and BF have sysref count explosion between old and new — pending investigation.
   source_filter: "systemreferenceno LIKE 'P%' OR systemreferenceno LIKE 'ADC%'"
 
 anchor_key:
@@ -50,6 +51,8 @@ transaction_grouping:
     old: systemreferenceno
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_sysref_sort: true         # rows are SCATTERED (100% of groups, avg ratio 5M×)
+                                  # source_filter filters on group key column → compatible with group pagination
 
 defaults:
   tolerance: 0.01

@@ -24,37 +24,11 @@ def_id: def001
 target_scope: transaction_group
 
 actions:
-  # -------------------------------------------------------
-  # Step 1: interestpaid → creditinterestamount (credit row)
-  # H Row 1 carries creditinterestamount = interestpaid
-  # H Row 2 carries debitinterestamount  = interestpaid (same value, debit side)
-  # Check credit side: SUM(old.interestpaid) = SUM(new.creditinterestamount)
-  # -------------------------------------------------------
-  - step: "1"
-    check_type: ROW_LEVEL_COHESION
-    variables:
-      val_interestpaid: "SUM(old.interestpaid)"
-      val_credit_interest: "SUM(new.creditinterestamount)"
-    condition: "val_interestpaid == val_credit_interest"
-    error_message: >
-      interestpaid not correctly pivoted to creditinterestamount.
-      old.interestpaid={val_interestpaid}, new.creditinterestamount={val_credit_interest}.
-
-  # -------------------------------------------------------
-  # Step 2: interestpaid → debitinterestamount (debit row)
-  # SUM(new.debitinterestamount) should also equal |interestpaid|
-  # For normal transactions: debitinterestamount = interestpaid (positive)
-  # For ADJ transactions: debitinterestamount = abs(interestpaid) (sign-flipped) → will mismatch
-  # -------------------------------------------------------
-  - step: "2"
-    check_type: ROW_LEVEL_COHESION
-    variables:
-      val_interestpaid: "SUM(old.interestpaid)"
-      val_debit_interest: "SUM(new.debitinterestamount)"
-    condition: "val_interestpaid == val_debit_interest"
-    error_message: >
-      interestpaid not correctly pivoted to debitinterestamount.
-      old.interestpaid={val_interestpaid}, new.debitinterestamount={val_debit_interest}.
+  # REMOVED Step 1 (interestpaid → creditinterestamount) and Step 2 (interestpaid → debitinterestamount):
+  # Root cause: 100% of SBT sysrefs overlap with vinplhistory (confirmed via DB query).
+  # For sysrefs with multiple vinplhistory IN/C rows, H gets extra credit/debit rows →
+  # SUM(H.creditinterestamount) ≠ SBT.interestpaid → guaranteed false mismatch.
+  # Double-entry self-balance (step 5) still catches unbalanced rows without false positives.
 
   # -------------------------------------------------------
   # Step 3: interest33 ≈ totaltax in H
@@ -120,3 +94,39 @@ actions:
       SBT tax inconsistency in source data.
       old.sbttotalamount={val_sbttotal} != old.sbtrevenue({val_sbtrev}) + old.sbtrevenueamount({val_sbtrevamt}).
       Possible SBT tax calculation error in the source system.
+
+  # -------------------------------------------------------
+  # Step 7: PP/C → creditprincipleamount
+  # Source: conv$vinplhistory (has affectcode + debitcredit columns)
+  # SUM of transactionamount where affectcode=PP AND debitcredit=C
+  # must equal SUM(new.creditprincipleamount)
+  # -------------------------------------------------------
+  - step: "7"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [PP]
+    variables:
+      val_pp_credit: "SUM(old.transactionamount[affectcode=PP][debitcredit=C])"
+      val_credit_principle: "SUM(new.creditprincipleamount)"
+    condition: "val_pp_credit == val_credit_principle"
+    error_message: >
+      PP/C not correctly pivoted to creditprincipleamount.
+      old.transactionamount[PP/C]={val_pp_credit}, new.creditprincipleamount={val_credit_principle}.
+
+  # -------------------------------------------------------
+  # Step 8: QQ/C → transactionamount
+  # Source: conv$vinplhistory (has affectcode + debitcredit columns)
+  # SUM of transactionamount where affectcode=QQ AND debitcredit=C
+  # must equal SUM(new.transactionamount)
+  # -------------------------------------------------------
+  - step: "8"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [QQ]
+    variables:
+      val_qq_credit: "SUM(old.transactionamount[affectcode=QQ][debitcredit=C])"
+      val_tx_amount: "SUM(new.transactionamount)"
+    condition: "val_qq_credit == val_tx_amount"
+    error_message: >
+      QQ/C not correctly pivoted to transactionamount.
+      old.transactionamount[QQ/C]={val_qq_credit}, new.transactionamount={val_tx_amount}.

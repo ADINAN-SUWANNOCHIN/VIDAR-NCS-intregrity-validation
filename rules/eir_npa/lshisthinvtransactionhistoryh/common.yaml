@@ -41,6 +41,7 @@ transaction_grouping:
     old: systemreferencenumber
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_sysref_sort: true         # rows are SCATTERED (same source as lshistinvtransactionhistory)
 
 defaults:
   tolerance: 0.01

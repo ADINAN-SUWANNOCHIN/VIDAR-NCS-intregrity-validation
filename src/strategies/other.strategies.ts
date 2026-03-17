@@ -1,5 +1,5 @@
 import { DatabaseService, tableRef } from '../database/database.service';
-import { ConcatMatch, ExactMatch, FormulaMatch, NoisyColumnType, SplitMatch, TransformedMatch, ValidationError } from '../rules/rule.types';
+import { NoisyColumnType, SchemaMappings, ValidationError } from '../rules/rule.types';
 import { BaseStrategy, ValidationContext } from './base.strategy';
 import { TransformUtils } from './transform.utils';
 
@@ -401,6 +401,8 @@ export class UnionStrategy extends BaseStrategy {
     // Stream each source by anchorKey → fetch matching target rows → group by groupKey in memory.
     // Carry-over: if the last group in a chunk might continue in the next chunk, hold it back
     // and merge it before comparing. This prevents wrong group-level sums at chunk boundaries.
+    const sourceFilter = commonRule.table_info.source_filter;
+
     for (const src of sources) {
       this.logger.log(`[UNION] Processing source: ${src}`);
       let lastAnchorKey: unknown = null;
@@ -408,7 +410,7 @@ export class UnionStrategy extends BaseStrategy {
       let carryNew = new Map<string, Record<string, unknown>[]>();
 
       while (true) {
-        const oldChunk = await this.db.fetchChunk(src, anchorKeyOld, chunkSize, lastAnchorKey);
+        const oldChunk = await this.db.fetchChunk(src, anchorKeyOld, chunkSize, lastAnchorKey, sourceFilter);
         if (oldChunk.length === 0) break;
 
         // Unique anchor key values in this chunk
@@ -636,6 +638,173 @@ export class MultipleStrategy extends BaseStrategy {
         ];
         const noisyMap = await this.detectNoisyColumns(srcTable, allOldCols);
 
+        // ---- Sysref-sort mode (use_sysref_sort: true) ----
+        // Source cache: copy srcTable → temp table with clustered index on (sysref, id).
+        // Eliminates repeated full-table sorts per paginated chunk (ECONNRESET root cause).
+        // srcFilter is baked into the cache so no filter is needed in subsequent fetchChunk calls.
+        if (tg.use_sysref_sort) {
+          const tempName = `##dv_src_${process.pid}_${Date.now()}`;
+          await this.db.createSourceCache(srcTable, tempName, srcKeyCol, commonRule.anchor_key.old, srcFilter ?? undefined);
+          let lastKey: unknown = null;
+          let carryOld = new Map<string, Record<string, unknown>[]>();
+          let carryNew = new Map<string, Record<string, unknown>[]>();
+
+          try {
+          while (true) {
+            const oldChunk = await this.db.fetchChunk(tempName, srcKeyCol, chunkSize, lastKey);
+            if (oldChunk.length === 0) break;
+
+            const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
+            const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
+            carryOld = new Map();
+            carryNew = new Map();
+
+            const groupKeyVals = [
+              ...new Set(oldChunk.map((r) => String(r[srcKeyCol] ?? '').trim())),
+            ].filter((k) => k !== '' && !newGroupMap.has(k));
+
+            const newRows: Record<string, unknown>[] = [];
+            await this.db.streamRowsByKeys(tgtTable, targetFetchKey, groupKeyVals, (row) => newRows.push(row));
+
+            for (const row of oldChunk) {
+              const key = String(row[srcKeyCol] ?? '').trim();
+              if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
+              oldGroupMap.get(key)!.push(row);
+              rowsChecked++;
+            }
+            for (const row of newRows) {
+              const key = String(row[newKeyCol] ?? '').trim();
+              if (!newGroupMap.has(key)) newGroupMap.set(key, []);
+              newGroupMap.get(key)!.push(row);
+            }
+
+            const isLastChunk = oldChunk.length < chunkSize;
+            const carryKey = !isLastChunk ? [...oldGroupMap.keys()].at(-1) : undefined;
+            if (carryKey) {
+              carryOld.set(carryKey, oldGroupMap.get(carryKey)!);
+              if (newGroupMap.has(carryKey)) carryNew.set(carryKey, newGroupMap.get(carryKey)!);
+            }
+
+            for (const [groupKey, oldGroup] of oldGroupMap) {
+              if (groupKey === carryKey) continue;
+              const newGroup = newGroupMap.get(groupKey) ?? [];
+              if (newGroup.length === 0) {
+                errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
+                continue;
+              }
+              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+              const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
+              errors.push(...groupErrors);
+              if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
+                errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+              }
+              errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+            }
+
+            for (const [groupKey] of newGroupMap) {
+              if (groupKey === carryKey) continue;
+              if (!oldGroupMap.has(groupKey)) {
+                errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row)` });
+              }
+            }
+
+            lastKey = oldChunk[oldChunk.length - 1][srcKeyCol];
+            if (isLastChunk) break;
+          }
+
+          // Flush carry
+          for (const [groupKey, oldGroup] of carryOld) {
+            const newGroup = carryNew.get(groupKey) ?? [];
+            if (newGroup.length === 0) {
+              errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
+              continue;
+            }
+            const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+            errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap));
+            errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+          }
+          for (const [groupKey] of carryNew) {
+            if (!carryOld.has(groupKey)) {
+              errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row in carry)` });
+            }
+          }
+          } finally {
+            await this.db.dropSourceCache(tempName);
+          }
+
+          continue; // skip anchor-key streaming for this pair
+        }
+
+        // ---- Group-key pagination mode (use_group_pagination: true) ----
+        // Mirrors TransactionStrategy.validateGroupPagination.
+        // Use when group rows are SCATTERED in anchor-key (id) order — carry-over streaming
+        // compares partial groups per chunk → false VALUE_MISMATCH errors.
+        if (tg.use_group_pagination) {
+          const GROUP_BATCH = 200;
+          let lastGroupKey: string | null = null;
+          while (true) {
+            const groupKeys = await this.db.getDistinctKeys(
+              srcTable, srcKeyCol, GROUP_BATCH, lastGroupKey, srcFilter,
+            );
+            if (groupKeys.length === 0) break;
+
+            const oldRows: Record<string, unknown>[] = [];
+            await this.db.streamRowsByKeys(srcTable, srcKeyCol, groupKeys, (row) => oldRows.push(row));
+            const newRows: Record<string, unknown>[] = [];
+            await this.db.streamRowsByKeys(tgtTable, targetFetchKey, groupKeys, (row) => newRows.push(row));
+
+            const oldGroupMap = new Map<string, Record<string, unknown>[]>();
+            for (const row of oldRows) {
+              const key = String(row[srcKeyCol] ?? '').trim();
+              if (!key) continue;
+              if (!oldGroupMap.has(key)) oldGroupMap.set(key, []);
+              oldGroupMap.get(key)!.push(row);
+              rowsChecked++;
+            }
+
+            const newGroupMap = new Map<string, Record<string, unknown>[]>();
+            for (const row of newRows) {
+              const key = String(row[newKeyCol] ?? '').trim();
+              if (!key) continue;
+              if (!newGroupMap.has(key)) newGroupMap.set(key, []);
+              newGroupMap.get(key)!.push(row);
+            }
+
+            for (const [groupKey, oldGroup] of oldGroupMap) {
+              const newGroup = newGroupMap.get(groupKey) ?? [];
+              if (newGroup.length === 0) {
+                errors.push({
+                  errorType: 'ROW_MISSING',
+                  groupKey,
+                  message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}`,
+                });
+                continue;
+              }
+              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+              const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
+              errors.push(...groupErrors);
+              if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
+                errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+              }
+              errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+            }
+
+            for (const [groupKey] of newGroupMap) {
+              if (!oldGroupMap.has(groupKey)) {
+                errors.push({
+                  errorType: 'ROW_MISSING',
+                  groupKey,
+                  message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row)`,
+                });
+              }
+            }
+
+            lastGroupKey = groupKeys[groupKeys.length - 1];
+            if (groupKeys.length < GROUP_BATCH) break;
+          }
+          continue; // skip carry-over streaming for this pair
+        }
+
         // Anchor key uniqueness check (ensures keyset pagination works correctly)
         const anchorDupErr = await this.checkAnchorKeyUnique(srcTable, anchorKeyOld);
         if (anchorDupErr) {
@@ -651,18 +820,22 @@ export class MultipleStrategy extends BaseStrategy {
           const oldChunk = await this.db.fetchChunk(srcTable, anchorKeyOld, chunkSize, lastKey, srcFilter);
           if (oldChunk.length === 0) break;
 
-          // Collect unique group key values to fetch corresponding target rows
-          const groupKeyVals = [...new Set(oldChunk.map((r) => String(r[srcKeyCol] ?? '').trim()))];
-
-          // Fetch target rows by GROUP KEY (not by anchor key — old id has no match in new)
-          const newRows: Record<string, unknown>[] = [];
-          await this.db.streamRowsByKeys(tgtTable, targetFetchKey, groupKeyVals, (row) => newRows.push(row));
-
-          // Seed group maps with carry-over from previous chunk
+          // Seed group maps with carry-over from previous chunk BEFORE computing groupKeyVals
+          // so we can exclude already-fetched carry groups (Bug 2 fix — mirrors TransactionStrategy).
+          // Without this, the carry group's target rows are re-fetched and appended → doubled sums.
           const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
           const newGroupMap = new Map<string, Record<string, unknown>[]>(carryNew);
           carryOld = new Map();
           carryNew = new Map();
+
+          // Collect unique group key values, excluding keys already in newGroupMap (carry)
+          const groupKeyVals = [
+            ...new Set(oldChunk.map((r) => String(r[srcKeyCol] ?? '').trim())),
+          ].filter((k) => k !== '' && !newGroupMap.has(k));
+
+          // Fetch target rows by GROUP KEY (not by anchor key — old id has no match in new)
+          const newRows: Record<string, unknown>[] = [];
+          await this.db.streamRowsByKeys(tgtTable, targetFetchKey, groupKeyVals, (row) => newRows.push(row));
 
           for (const row of oldChunk) {
             const key = String(row[srcKeyCol] ?? '').trim();
@@ -695,7 +868,8 @@ export class MultipleStrategy extends BaseStrategy {
               });
               continue;
             }
-            errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, { exact, transformed, concat, split, formula }, tolerance, noisyMap));
+            const pairSmCo: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+            errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmCo, tolerance, noisyMap));
             errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
           }
 
@@ -726,7 +900,8 @@ export class MultipleStrategy extends BaseStrategy {
             });
             continue;
           }
-          errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, { exact, transformed, concat, split, formula }, tolerance, noisyMap));
+          const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+          errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap));
           errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
         }
         for (const [groupKey] of carryNew) {
@@ -869,19 +1044,13 @@ export class MultipleStrategy extends BaseStrategy {
     groupKey: string,
     oldGroup: Record<string, unknown>[],
     newGroup: Record<string, unknown>[],
-    mappings: {
-      exact: ExactMatch[] | undefined;
-      transformed: TransformedMatch[] | undefined;
-      concat: ConcatMatch[] | undefined;
-      split: SplitMatch[] | undefined;
-      formula: FormulaMatch[] | undefined;
-    },
+    mappings: SchemaMappings,
     tolerance: number,
     noisyMap: Map<string, NoisyColumnType>,
   ): ValidationError[] {
     const errors: ValidationError[] = [];
 
-    for (const m of mappings.exact ?? []) {
+    for (const m of mappings.exact_matches ?? []) {
       if (this.isNoisyType(noisyMap.get(m.old))) continue;
       const oldTotal = this.sumColumn(oldGroup, m.old);
       const newTotal = this.sumColumn(newGroup, m.new);
@@ -898,7 +1067,7 @@ export class MultipleStrategy extends BaseStrategy {
       }
     }
 
-    for (const m of mappings.transformed ?? []) {
+    for (const m of mappings.transformed_matches ?? []) {
       if (this.isNoisyType(noisyMap.get(m.old))) continue;
       const oldTotal = this.sumColumn(oldGroup, m.old);
       const newTotal = this.sumColumn(newGroup, m.new);
@@ -915,7 +1084,7 @@ export class MultipleStrategy extends BaseStrategy {
       }
     }
 
-    for (const m of mappings.concat ?? []) {
+    for (const m of mappings.concat_matches ?? []) {
       if (m.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
       // concat in group mode: concatenate all distinct old values, compare to all distinct new values
       const sep = m.separator ?? '';
@@ -934,7 +1103,7 @@ export class MultipleStrategy extends BaseStrategy {
       }
     }
 
-    for (const m of mappings.split ?? []) {
+    for (const m of mappings.split_matches ?? []) {
       if (this.isNoisyType(noisyMap.get(m.old))) continue;
       const oldTotal = this.sumColumn(oldGroup, m.old);
       const newTotals = m.new_cols.map((c) => this.sumColumn(newGroup, c));
@@ -954,7 +1123,7 @@ export class MultipleStrategy extends BaseStrategy {
       }
     }
 
-    for (const m of mappings.formula ?? []) {
+    for (const m of mappings.formula_matches ?? []) {
       if (m.old_cols.some((c) => this.isNoisyType(noisyMap.get(c)))) continue;
       const oldInputs = m.old_cols.map((c) => this.sumColumn(oldGroup, c));
       if (oldInputs.some((v) => v === null)) continue;

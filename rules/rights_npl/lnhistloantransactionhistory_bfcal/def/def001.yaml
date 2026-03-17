@@ -1,0 +1,28 @@
+# ============================================================
+# def001 — BF/CAL_INT/B_DIFF Row Count Check
+# Scope: rights_npl / lnhistloantransactionhistory_bfcal
+#
+# Validates that the total number of rows for each system batch sysref
+# (BF, CAL_INT, B_DIFF) was fully migrated — no rows dropped.
+#
+# Value comparison is intentionally skipped for these sysrefs because
+# each sysref is shared across ALL accounts, making per-group value
+# aggregation semantically meaningless.
+#
+# Pass condition: COUNT(old rows for this sysref) == COUNT(new rows for this sysref)
+# ============================================================
+
+def_id: def001
+target_scope: transaction_group
+
+actions:
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old_count: "COUNT(old)"
+      val_new_count: "COUNT(new)"
+    condition: "val_old_count == val_new_count"
+    error_message: >
+      Row count mismatch for system batch sysref.
+      old count={val_old_count}, new count={val_new_count}.
+      Rows may have been dropped during migration for this BF/CAL_INT/B_DIFF batch.

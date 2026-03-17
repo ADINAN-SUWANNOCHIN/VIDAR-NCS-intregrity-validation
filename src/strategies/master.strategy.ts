@@ -24,6 +24,17 @@ export class MasterStrategy extends BaseStrategy {
 
     this.logger.log(`[MASTER] Validating ${source} → ${target}`);
 
+    // DEF rules are not supported in MasterStrategy — the worker thread processes row comparisons
+    // and does not return old+new row pairs needed by runDefRules. If def rules are needed for a
+    // MASTER table, convert it to TRANSACTION type or implement a second-pass DEF evaluation.
+    if (ctx.defRules.length > 0) {
+      this.logger.warn(`[MASTER] ${ctx.defRules.length} DEF rule(s) defined but MASTER strategy does not support DEF evaluation — skipped`);
+      errors.push({
+        errorType: 'TRANSFORM_ERROR',
+        message: `[MASTER] DEF rules are not evaluated for MASTER strategy tables. Convert to TRANSACTION type if DEF rules are required.`,
+      });
+    }
+
     // ---- 1. Schema check — resilient (Issue #1) ----
     const expectedMappings = [
       ...(sm.exact_matches ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),

@@ -47,6 +47,7 @@ transaction_grouping:
     old: systemreferenceno
     new: systemreferenceno
   target_fetch_key: journalseqno  # indexed; verified equal to systemreferenceno on all rows
+  use_sysref_sort: true         # rows are SCATTERED (100% of groups, avg ratio 46M×)
 
 defaults:
   tolerance: 0.01

@@ -92,6 +92,7 @@ export interface FilteredSumMatch {
     affectcode_in?: string[];             // e.g. ['PP'] or ['I1','I2','I3','IN','IT','GG']
     debitcredit?: string;                 // 'C' or 'D'
     loantranshostcode_not_in?: string[];  // consolidate=N exclusion list
+    loantranshostcode_in?: string[];      // whitelist: only include rows with these lthc values
   };
   new: string;                            // target column (e.g. lvcreditprincipleamount)
 }
@@ -119,6 +120,70 @@ export interface TransactionGrouping {
   // Use when an indexed column (e.g. journalseqno) stores the same value as keys.new
   // but has an index while keys.new does not — avoids full table scan on target fetch.
   target_fetch_key?: string;
+  /**
+   * Group-key pagination mode — paginate by DISTINCT group key values instead of anchor key.
+   *
+   * Set to true when group rows are SCATTERED in anchor-key (id) order, meaning rows for the
+   * same sysref are spread across the entire table rather than clustered together.
+   *
+   * Without this flag (default anchor-key streaming), the carry-over mechanism only protects
+   * the LAST group per chunk. Scattered groups get compared with partial old rows against all
+   * new rows in every chunk they appear in → produces thousands of false VALUE_MISMATCH errors.
+   *
+   * With this flag, the engine uses getDistinctKeys() to paginate sysrefs, then fetches ALL
+   * rows for each sysref batch at once — groups are always complete before comparison.
+   *
+   * When to use:
+   *   - Run contiguity check: SELECT MAX(id)-MIN(id)+1 vs COUNT(*) GROUP BY sysref.
+   *     If ratio >> 1 for most groups → set this flag.
+   *   - Confirmed scattered: conv$vinpllvhistory (83.7% scattered, ratio 27K×),
+   *     conv$vinplhistory for lnhistloantransactionhistory (BF ratio 2282×).
+   *
+   * Limitation: source_filter must filter on the group key column itself (e.g. NOT IN list).
+   *   Column-based filters (e.g. invaccounttype='TF') are not applied to streamRowsByKeys —
+   *   use anchor-key streaming for those tables (they tend to have contiguous groups anyway).
+   */
+  use_group_pagination?: boolean;
+  /**
+   * Sysref-sort mode — page OLD table sorted by group key (sysref), carry-over at boundary.
+   *
+   * Better than use_group_pagination for the same scatter problem:
+   *   - use_group_pagination: getDistinctKeys (full scan) + streamRowsByKeys (full scan) = 2× old scans per batch
+   *   - use_sysref_sort:      fetchChunk ORDER BY sysref (full scan once) = 1× old scan per chunk
+   *
+   * Since old rows are sorted by sysref, all rows for the same sysref are contiguous.
+   * Scatter is impossible within the sorted order — carry-over only needs to bridge ONE
+   * chunk boundary per sysref, which is the same guarantee as the default anchor-key mode.
+   *
+   * Use this instead of use_group_pagination when:
+   *   - Group rows are scattered in id order (same condition as use_group_pagination)
+   *   - No index on sysref column (both modes do full scans, but this does half as many)
+   *
+   * Note: source_filter is applied to fetchChunk — works for both sysref-based and
+   * column-based filters (unlike use_group_pagination which requires sysref-based filters).
+   */
+  use_sysref_sort?: boolean;
+  /**
+   * Row-level fingerprint columns for post-mismatch diff.
+   *
+   * When set, any group that produces a VALUE_MISMATCH will trigger a row-by-row
+   * fingerprint comparison. Each row in old and new is fingerprinted by joining the
+   * specified column values with '|'. The engine diffs old vs new as multisets and
+   * reports unmatched fingerprints as ROW_MISSING entries — telling the engineer
+   * exactly which transaction (by date/amount/etc.) is missing or extra.
+   *
+   * Only fires after a mismatch — zero cost for groups that pass cleanly.
+   * Useful for large scatter tables where the report otherwise only says
+   * "group P6303-005209: sum mismatch" with no row-level detail.
+   *
+   * Example:
+   *   row_fingerprint:
+   *     - old: transactiondate
+   *       new: transactiondate
+   *     - old: transactionamount
+   *       new: transactionamount
+   */
+  row_fingerprint?: Array<{ old: string; new: string }>;
   /**
    * Composite group key — adds a second key component beyond keys.old/keys.new.
    *
@@ -175,6 +240,10 @@ export interface CommonRule {
 export interface DefAction {
   step: string;
   check_type: string;
+  trigger_condition?: {
+    must_have_all?: string[];
+    must_have_any?: string[];
+  };
   variables?: Record<string, string>;
   condition: string;
   error_message: string;

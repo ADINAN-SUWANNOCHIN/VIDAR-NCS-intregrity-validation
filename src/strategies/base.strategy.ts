@@ -144,27 +144,47 @@ export abstract class BaseStrategy {
     const result = new Map<string, NoisyColumnType>();
     if (columns.length === 0) return result;
 
-    let sample: Record<string, unknown>[];
-    try {
-      sample = await this.db.sampleRows(table, 1000);
-    } catch (e: unknown) {
-      this.logger.warn(
-        `[noisy-col] sampleRows failed for [${table}] — all columns treated as NORMAL. Cause: ${(e as Error)?.message ?? String(e)}`,
-      );
-      columns.forEach((c) => result.set(c, 'NORMAL'));
-      return result;
-    }
+    const tRef = tableRef(table);
 
     for (const col of columns) {
-      const values = sample.map((r) => r[col]);
+      try {
+        // Check 1: does any non-null value exist?
+        const nonNullRows = await this.db.query<Record<string, unknown>>(
+          `SELECT TOP 1 [${col}] as v FROM ${tRef} WHERE [${col}] IS NOT NULL`,
+        );
+        if (nonNullRows.length === 0) {
+          result.set(col, 'NULL');
+          continue;
+        }
 
-      if (TransformUtils.isNullColumn(values)) {
-        result.set(col, 'NULL');
-      } else if (TransformUtils.isBooleanColumn(values)) {
-        result.set(col, 'BOOLEAN');
-      } else if (TransformUtils.isZeroColumn(values)) {
-        result.set(col, 'ZERO');
-      } else {
+        // Check 2: does any non-zero, non-empty value exist?
+        // Covers numeric 0, string '0', and empty string ''
+        // Use CAST to nvarchar throughout — avoids implicit int conversion errors on string columns.
+        const nonZeroRows = await this.db.query<Record<string, unknown>>(
+          `SELECT TOP 1 [${col}] as v FROM ${tRef} ` +
+          `WHERE [${col}] IS NOT NULL AND CAST([${col}] AS NVARCHAR(MAX)) NOT IN ('0', '')`,
+        );
+        if (nonZeroRows.length === 0) {
+          result.set(col, 'ZERO');
+          continue;
+        }
+
+        // Check 3: are all values boolean-like (0/1 only)?
+        const nonBoolRows = await this.db.query<Record<string, unknown>>(
+          `SELECT TOP 1 [${col}] as v FROM ${tRef} ` +
+          `WHERE [${col}] IS NOT NULL AND CAST([${col}] AS NVARCHAR(MAX)) NOT IN ('0', '1', 'true', 'false')`,
+        );
+        if (nonBoolRows.length === 0) {
+          result.set(col, 'BOOLEAN');
+          continue;
+        }
+
+        result.set(col, 'NORMAL');
+      } catch (e: unknown) {
+        // Column type may not support the cast — treat as NORMAL (safe default: compare it)
+        this.logger.warn(
+          `[noisy-col] Check failed for [${col}] in [${table}] — treating as NORMAL. Cause: ${(e as Error)?.message ?? String(e)}`,
+        );
         result.set(col, 'NORMAL');
       }
     }
@@ -345,6 +365,16 @@ export abstract class BaseStrategy {
       }
 
       for (const action of def.actions) {
+        // Per-action trigger_condition — e.g. step 7 only fires when group has PP rows
+        if (action.trigger_condition?.must_have_all || action.trigger_condition?.must_have_any) {
+          const oldAffectCodes = this.extractAffectCodes(oldGroup, affectCodeMap);
+          if (action.trigger_condition.must_have_all) {
+            if (!action.trigger_condition.must_have_all.every((code) => oldAffectCodes.has(code))) continue;
+          }
+          if (action.trigger_condition.must_have_any) {
+            if (!action.trigger_condition.must_have_any.some((code) => oldAffectCodes.has(code))) continue;
+          }
+        }
         errors.push(...this.evaluateDefAction(def.def_id, groupKey, oldGroup, newGroup, action, tolerance));
       }
     }
@@ -498,7 +528,7 @@ export abstract class BaseStrategy {
    * Supported formats:
    *   SUM(old.col)                       — sum of col across all old rows
    *   SUM(new.col)                       — sum of col across all new rows
-   *   SUM(old.col[filterCol=val])        — conditional sum (bracket filter)
+   *   SUM(old.col[f1=v1][f2=v2]...)      — conditional sum (one or more bracket filters AND-ed)
    *   SUM(old.col) WHERE filterCol == 'val'  — same as bracket filter (legacy syntax)
    *   COUNT(old)                         — number of old rows in this group
    *   COUNT(new)                         — number of new rows in this group
@@ -519,12 +549,20 @@ export abstract class BaseStrategy {
         .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
     }
 
-    // SUM(old.col[filterCol=val])  — bracket filter (shorter YAML syntax)
-    const bracketMatch = t.match(/^SUM\(old\.(\w+)\[(\w+)=([^\]]+)\]\)$/i);
+    // SUM(old.col[f1=v1][f2=v2]...)  — one or more bracket filters (shorter YAML syntax)
+    const bracketMatch = t.match(/^SUM\(old\.(\w+)((?:\[[^\]]+\])+)\)$/i);
     if (bracketMatch) {
-      const [, col, filterCol, filterVal] = bracketMatch;
+      const [, col, bracketStr] = bracketMatch;
+      const conditions = [...bracketStr.matchAll(/\[(\w+)=([^\]]+)\]/g)].map(
+        (m) => [m[1], m[2].trim()] as [string, string],
+      );
       return oldRows
-        .filter((r) => String(r[filterCol] ?? '').toUpperCase() === filterVal.trim().toUpperCase())
+        .filter((r) =>
+          conditions.every(
+            ([filterCol, filterVal]) =>
+              String(r[filterCol] ?? '').toUpperCase() === filterVal.toUpperCase(),
+          ),
+        )
         .reduce((sum, r) => sum + (parseFloat(String(r[col] ?? 0)) || 0), 0);
     }
 
@@ -546,7 +584,7 @@ export abstract class BaseStrategy {
 
     throw new Error(
       `DEF rule expression not parseable: "${expr}" — ` +
-      `supported: SUM(old.col), SUM(new.col), SUM(old.col[filterCol=val]), COUNT(old), COUNT(new)`,
+      `supported: SUM(old.col), SUM(new.col), SUM(old.col[f1=v1][f2=v2]...), COUNT(old), COUNT(new)`,
     );
   }
 
@@ -599,6 +637,74 @@ export abstract class BaseStrategy {
     } catch (e: any) {
       throw new Error(`DEF condition evaluation failed: "${condition}": ${e.message}`);
     }
+  }
+
+  /**
+   * Normalizes a fingerprint column value so old and new produce the same string.
+   * - Date object (mssql datetime2) → toISOString().slice(0,10)
+   * - ISO nvarchar "2024-01-15T..." → extract date before T
+   * - Numeric string / number → parseFloat (strips trailing zeros)
+   * - Other → trim to string
+   */
+  protected normalizeFingerprint(v: unknown): string {
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    const s = String(v ?? '').trim();
+    const dateMatch = s.match(/^(\d{4}-\d{2}-\d{2})T/);
+    if (dateMatch) return dateMatch[1];
+    const n = parseFloat(s);
+    if (!isNaN(n) && s !== '') return String(n);
+    return s;
+  }
+
+  /**
+   * Row-level fingerprint diff — call after validateGroup finds errors.
+   * Diffs old vs new as multisets by joining fpCols values with '|'.
+   * Reports ROW_MISSING with [FP] prefix for unmatched rows.
+   */
+  protected fingerprintDiff(
+    groupKey: string,
+    oldGroup: Record<string, unknown>[],
+    newGroup: Record<string, unknown>[],
+    fpCols: Array<{ old: string; new: string }>,
+  ): ValidationError[] {
+    const errors: ValidationError[] = [];
+
+    const buildMultiset = (
+      rows: Record<string, unknown>[],
+      colKey: (c: { old: string; new: string }) => string,
+    ): Map<string, number> => {
+      const map = new Map<string, number>();
+      for (const row of rows) {
+        const fp = fpCols.map((c) => this.normalizeFingerprint(row[colKey(c)])).join('|');
+        map.set(fp, (map.get(fp) ?? 0) + 1);
+      }
+      return map;
+    };
+
+    const oldMs = buildMultiset(oldGroup, (c) => c.old);
+    const newMs = buildMultiset(newGroup, (c) => c.new);
+
+    for (const [fp, cnt] of oldMs) {
+      const missing = cnt - (newMs.get(fp) ?? 0);
+      if (missing > 0) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `[FP] ${missing}x in source not in target — group: ${groupKey} | ${fp}`,
+        });
+      }
+    }
+    for (const [fp, cnt] of newMs) {
+      const extra = cnt - (oldMs.get(fp) ?? 0);
+      if (extra > 0) {
+        errors.push({
+          errorType: 'ROW_MISSING',
+          groupKey,
+          message: `[FP] ${extra}x extra in target not in source — group: ${groupKey} | ${fp}`,
+        });
+      }
+    }
+    return errors;
   }
 
   protected sumColumn(rows: Record<string, unknown>[], col: string): number | null {
