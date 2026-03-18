@@ -1,4 +1,4 @@
-# VIDAR — Data Validation Service
+# VIDAR — Data Validation Service.
 
 Post-migration data validation engine for BAM NCS system.
 Compares legacy source data (`ncs-conv-aging`) against migrated target data (`ncs-npl-aging`) to confirm correctness of the ETL migration.
