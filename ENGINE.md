@@ -227,19 +227,40 @@ IF OBJECT_ID('tempdb..[##dv_src_...]') IS NOT NULL DROP TABLE [##dv_src_...]
 -- Step 2: Copy source table (one upfront full scan)
 SELECT * INTO [##dv_src_...] FROM [sourceTable] WITH (NOLOCK) WHERE filter
 
--- Step 3: Create clustered index (server-side sort, one time)
+-- Step 3: Normalize sysref column width for index compatibility
+ALTER TABLE [##dv_src_...] ALTER COLUMN [sysrefCol] NVARCHAR(450)
+
+-- Step 4: Create clustered index (server-side sort, one time)
 CREATE CLUSTERED INDEX [ix_dv_src] ON [##dv_src_...] ([sysrefCol], [idCol])
 ```
 
-Both the INSERT and CREATE INDEX use `(req as any).timeout = 0` to override the pool's 30-minute limit — large tables can take longer.
+Step 3 is required because some source tables declare `systemreferenceno` as `nvarchar(MAX)`. SQL Server cannot create an index on a MAX-width column. Altering to `nvarchar(450)` (the maximum indexable width) is safe — sysref values are never close to 450 characters.
 
-### `createTargetCache(targetTable, tempName, fetchKey, compositeKey)`
+All three data operations (INSERT, ALTER, CREATE INDEX) use `(req as any).timeout = 0` to override the pool's 30-minute limit — large tables can take longer.
 
-Same pattern for the target table, used by composite-key mode. Clustered on `(fetchKey, compositeKey)`.
+### `createTargetCache(sourceTable, tempName, primaryIndexCol, secondaryIndexCol)`
+
+Same pattern for the target table, used by composite-key mode. Clustered on `(primaryIndexCol, secondaryIndexCol)`.
 
 ### `dropSourceCache(tempName)` / `dropTargetCache(tempName)`
 
 Called in `finally` blocks to clean up temp tables even if validation fails. Wrapped in try/catch — if the drop fails (e.g. the table already got cleaned up), it logs a warning rather than crashing.
+
+### `getGroupKeys(table, groupKeyColumn, chunkSize, lastKey)`
+
+Paginates `DISTINCT` values of a group key column. Similar to `getDistinctKeys` but always binds `lastKey` as `NVarChar` — used by older group-pagination paths where the key is always a string. For new code, prefer `getDistinctKeys` which uses `bindLastKey` for correct type handling on numeric keys.
+
+### `streamAllRows(table, anchorColumn, callback, chunkSize?)`
+
+Streams every row from a table via keyset pagination, delivering rows one at a time via callback. Functionally equivalent to calling `fetchChunk` in a loop but in streaming mode (lower peak memory). Used by MasterStrategy's forward scan.
+
+### `sampleRows(table, sampleSize?)`
+
+Issues `SELECT TOP N * FROM [table]` and returns rows as an array. **Not used by the validation engine.** Used exclusively by `SchemaService` for the schema analysis / common01.xlsx generation feature.
+
+### `query<T>(sql, inputs?)`
+
+Generic read-only helper — executes an arbitrary SQL string with optional named inputs and returns typed records. Used by `BaseStrategy` for schema checks (`INFORMATION_SCHEMA.COLUMNS`), noisy column detection (`SELECT TOP 1 ...`), and anchor key uniqueness checks.
 
 ### Temp table naming: `##dv_src_{pid}_{seq}`
 
