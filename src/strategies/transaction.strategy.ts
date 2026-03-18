@@ -152,7 +152,7 @@ export class TransactionStrategy extends BaseStrategy {
       //   doubling group sums and producing false VALUE_MISMATCH errors.
       //
       // Performance (15M rows): at chunkSize=5000 and group_size≈2-5, each chunk produces
-      //   ~1000-2500 distinct group keys — within the 2000-key batch limit of streamRowsByKeys,
+      //   ~1000-2500 distinct group keys — well within streamRowsByKeys' 10,000-key batch limit,
       //   so each chunk triggers exactly one DB round-trip on the target side.
       const groupKeyVals = [
         ...new Set(oldChunk.map((r) => this.normalizeKey(r[oldKeyCol], tg.transform_key))),
