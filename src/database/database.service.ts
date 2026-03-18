@@ -42,6 +42,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         trustServerCertificate: true,
         readOnlyIntent: true,
         cryptoCredentialsDetails: { minVersion: 'TLSv1' }, // required for older SQL Server
+        // TCP keepalive — sends probes during long server-side operations (e.g. SELECT INTO for
+        // 15M-row source cache) where no data flows back to Node.js. Without this, the network
+        // firewall/LB sees the connection as idle and sends TCP RST → ECONNRESET.
+        // initialDelay=30s ensures probes start well before any reasonable firewall idle timeout.
+        keepAlive: true,
+        keepAliveInitialDelayMs: 30000,
       },
       pool: {
         max: 10,
@@ -96,11 +102,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Stream แถวทั้งหมดของกลุ่ม keys ที่กำหนด
-   * callback รับ row ทีละแถวเพื่อลด memory
+   * Stream all rows from a table where keyColumn matches any value in keys[].
    *
-   * SQL Server จำกัด parameters ต่อ query ที่ 2100 ดังนั้นถ้า keys มีมากกว่า 2000
-   * จะแตก batch แล้ว query ทีละ batch แทน
+   * Uses OPENJSON to pass keys as a single JSON array parameter instead of individual
+   * @k0, @k1, ... parameters. This bypasses SQL Server's 2100 parameter limit and allows
+   * batch sizes up to 10,000 keys per query — 5× fewer DB round-trips vs the old 2000-key
+   * parameterized IN clause.
+   *
+   * COLLATE DATABASE_DEFAULT on the OPENJSON [value] column ensures the comparison uses
+   * the target table's collation (e.g. Thai_CI_AS / Thai_CI_AI) and avoids collation
+   * conflict errors on cross-database queries.
+   *
+   * Requires SQL Server 2016+ (OPENJSON support).
    */
   async streamRowsByKeys(
     table: string,
@@ -110,18 +123,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     if (keys.length === 0) return;
 
-    const BATCH_SIZE = 2000;
+    const BATCH_SIZE = 10000;
     for (let i = 0; i < keys.length; i += BATCH_SIZE) {
       const batch = keys.slice(i, i + BATCH_SIZE);
 
       const request = this.pool.request();
       request.stream = true;
+      request.input('keys', sql.NVarChar(sql.MAX), JSON.stringify(batch));
 
-      // Parameterize key list เพื่อป้องกัน SQL injection
-      const placeholders = batch.map((_, j) => `@k${j}`).join(',');
-      batch.forEach((k, j) => request.input(`k${j}`, k));
-
-      request.query(`SELECT * FROM ${tableRef(table)} WITH (NOLOCK) WHERE [${keyColumn}] IN (${placeholders})`);
+      request.query(
+        `SELECT * FROM ${tableRef(table)} WITH (NOLOCK) ` +
+        `WHERE [${keyColumn}] IN (SELECT [value] COLLATE DATABASE_DEFAULT FROM OPENJSON(@keys))`,
+      );
 
       await new Promise<void>((resolve, reject) => {
         request.on('row', callback);
