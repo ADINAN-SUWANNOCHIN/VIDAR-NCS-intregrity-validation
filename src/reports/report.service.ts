@@ -2,18 +2,64 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import { createObjectCsvWriter } from 'csv-writer';
+import * as ExcelJS from 'exceljs';
 import { ValidationError } from '../rules/rule.types';
 
 export interface TableResult {
   tableName: string;
-  rowsChecked: number;  // actual rows validated — must equal expected total for PASS to be trustworthy
-  total: number;
-  pass: number;
-  fail: number;
-  missing: number;
-  timeSpent: number; // ms
+  sourceTable?: string;  // actual DB source table (from common.yaml table_info.source)
+  targetTable?: string;  // actual DB target table (from common.yaml table_info.target)
+  rowsChecked: number;   // total source rows processed by the engine
+  pass: number;          // source rows in groups with 0 errors (independently tracked)
+  fail: number;          // source rows in groups with ≥1 error (independently tracked)
+  skipped: number;       // rowsChecked - (pass + fail) — should be 0; >0 indicates a bug
+  total: number;         // total error count (errors.length)
+  missing: number;       // ROW_MISSING + COLUMN_MISSING + DATA_MISSING count
+  timeSpent: number;     // ms
   errors: ValidationError[];
+}
+
+// ----------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------
+
+const HEADER_FILL: ExcelJS.Fill = {
+  type: 'pattern',
+  pattern: 'solid',
+  fgColor: { argb: 'FF2F5496' },
+};
+
+const HEADER_FONT: Partial<ExcelJS.Font> = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+
+function styleHeader(sheet: ExcelJS.Worksheet): void {
+  const header = sheet.getRow(1);
+  header.font = HEADER_FONT;
+  header.fill = HEADER_FILL;
+  header.alignment = { vertical: 'middle', horizontal: 'center', wrapText: false };
+  header.height = 20;
+  sheet.views = [{ state: 'frozen', ySplit: 1 }];
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: sheet.columnCount } };
+}
+
+function autoWidth(sheet: ExcelJS.Worksheet, minWidth = 10, maxWidth = 60): void {
+  sheet.columns.forEach((col) => {
+    let max = minWidth;
+    col.eachCell?.({ includeEmpty: false }, (cell) => {
+      const len = String(cell.value ?? '').length;
+      if (len > max) max = len;
+    });
+    col.width = Math.min(max + 2, maxWidth);
+  });
+}
+
+function tableLabel(r: TableResult): string {
+  return r.tableName;
+}
+function sourceLabel(r: TableResult): string {
+  return r.sourceTable ?? '';
+}
+function targetLabel(r: TableResult): string {
+  return r.targetTable ?? '';
 }
 
 @Injectable()
@@ -30,77 +76,181 @@ export class ReportService {
     const jobDir = path.join(this.reportsDir, jobId);
     fs.mkdirSync(jobDir, { recursive: true });
 
-    const paths: string[] = [];
+    const xlsxPath = path.join(jobDir, 'Validation_Report.xlsx');
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'VIDAR DV Engine';
+    workbook.created = new Date();
 
-    // ---- Summary Report ----
-    const summaryPath = path.join(jobDir, 'Summary_Report.csv');
-    const summaryWriter = createObjectCsvWriter({
-      path: summaryPath,
-      header: [
-        { id: 'tableName', title: 'Table Name' },
-        { id: 'rowsChecked', title: 'Rows Checked' },
-        { id: 'total', title: 'Total Errors' },
-        { id: 'pass', title: 'Pass' },
-        { id: 'fail', title: 'Fail' },
-        { id: 'missing', title: 'Missing' },
-        { id: 'timeSpentSec', title: 'Time Spent (sec)' },
-        { id: 'status', title: 'Status' },
-      ],
-    });
+    this.buildSummarySheet(workbook, results);
+    this.buildValueMismatchSheet(workbook, results);
+    this.buildRowMissingSheet(workbook, results);
+    this.buildDefViolationSheet(workbook, results);
 
-    await summaryWriter.writeRecords(
-      results.map((r) => ({
-        tableName: r.tableName,
+    await workbook.xlsx.writeFile(xlsxPath);
+    this.logger.log(`Excel report written: ${xlsxPath}`);
+
+    return [xlsxPath];
+  }
+
+  // ----------------------------------------------------------------
+  // Sheet 1 — Summary
+  // ----------------------------------------------------------------
+  private buildSummarySheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
+    const sheet = wb.addWorksheet('Summary');
+
+    sheet.columns = [
+      { header: 'Rule',           key: 'rule',        width: 30 },
+      { header: 'Source Table',   key: 'source',      width: 28 },
+      { header: 'Target Table',   key: 'target',      width: 28 },
+      { header: 'Rows Checked',   key: 'rowsChecked', width: 14 },
+      { header: 'Pass (rows)',    key: 'pass',        width: 12 },
+      { header: 'Fail (rows)',    key: 'fail',        width: 12 },
+      { header: 'Skipped',        key: 'skipped',     width: 10 },
+      { header: 'Total Errors',   key: 'total',       width: 13 },
+      { header: 'Missing',        key: 'missing',     width: 10 },
+      { header: 'Time (sec)',     key: 'timeSec',     width: 11 },
+      { header: 'Status',         key: 'status',      width: 10 },
+      { header: 'Remarks',        key: 'remarks',     width: 50 },
+    ];
+
+    for (const r of results) {
+      const status = r.fail === 0 && r.missing === 0 && r.skipped === 0 ? 'PASS' : 'FAIL';
+      const remarkErrors = r.errors.filter((e) =>
+        ['COLUMN_MISSING', 'DATA_MISSING', 'TRANSFORM_ERROR'].includes(e.errorType),
+      );
+      const remarks = remarkErrors.map((e) => e.message).join(' | ');
+
+      const row = sheet.addRow({
+        rule:        tableLabel(r),
+        source:      sourceLabel(r),
+        target:      targetLabel(r),
         rowsChecked: r.rowsChecked,
-        total: r.total,
-        pass: r.pass,
-        fail: r.fail,
-        missing: r.missing,
-        timeSpentSec: (r.timeSpent / 1000).toFixed(2),
-        status: r.fail === 0 && r.missing === 0 ? 'PASS' : 'FAIL',
-      })),
-    );
-    paths.push(summaryPath);
-    this.logger.log(`Summary report written: ${summaryPath}`);
-
-    // ---- Detail Log per Table ----
-    for (const result of results) {
-      if (result.errors.length === 0) continue;
-
-      const detailPath = path.join(jobDir, `Detail_Log_${result.tableName}.csv`);
-      const detailWriter = createObjectCsvWriter({
-        path: detailPath,
-        header: [
-          { id: 'errorType', title: 'Error Type' },
-          { id: 'defId', title: 'Def ID' },
-          { id: 'groupKey', title: 'Group Key' },
-          { id: 'rowIdentifier', title: 'Row ID' },
-          { id: 'oldColumn', title: 'Old Column' },
-          { id: 'newColumn', title: 'New Column' },
-          { id: 'oldValue', title: 'Old Value' },
-          { id: 'newValue', title: 'New Value' },
-          { id: 'message', title: 'Message' },
-        ],
+        pass:        r.pass,
+        fail:        r.fail,
+        skipped:     r.skipped,
+        total:       r.total,
+        missing:     r.missing,
+        timeSec:     parseFloat((r.timeSpent / 1000).toFixed(2)),
+        status,
+        remarks,
       });
 
-      await detailWriter.writeRecords(
-        result.errors.map((e) => ({
-          errorType: e.errorType,
-          defId: e.defId ?? '',
-          groupKey: e.groupKey ?? '',
-          rowIdentifier: e.rowIdentifier ?? '',
-          oldColumn: e.oldColumn ?? '',
-          newColumn: e.newColumn ?? '',
-          oldValue: e.oldValue ?? '',
-          newValue: e.newValue ?? '',
-          message: e.message,
-        })),
-      );
-
-      paths.push(detailPath);
-      this.logger.log(`Detail log written: ${detailPath}`);
+      // Colour-code status cell
+      const statusCell = row.getCell('status');
+      statusCell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      statusCell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: status === 'PASS' ? 'FF1F7A45' : 'FFC00000' },
+      };
+      statusCell.alignment = { horizontal: 'center' };
     }
 
-    return paths;
+    styleHeader(sheet);
+  }
+
+  // ----------------------------------------------------------------
+  // Sheet 2 — Value Mismatch
+  // ----------------------------------------------------------------
+  private buildValueMismatchSheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
+    const sheet = wb.addWorksheet('Value_Mismatch');
+
+    sheet.columns = [
+      { header: 'Rule',        key: 'rule',      width: 30 },
+      { header: 'Source',      key: 'source',    width: 25 },
+      { header: 'Target',      key: 'target',    width: 25 },
+      { header: 'Group Key',   key: 'groupKey',  width: 20 },
+      { header: 'Row ID',      key: 'rowId',     width: 15 },
+      { header: 'Old Column',  key: 'oldCol',    width: 22 },
+      { header: 'New Column',  key: 'newCol',    width: 22 },
+      { header: 'Old Value',   key: 'oldVal',    width: 20 },
+      { header: 'New Value',   key: 'newVal',    width: 20 },
+      { header: 'Message',     key: 'message',   width: 60 },
+    ];
+
+    for (const r of results) {
+      for (const e of r.errors) {
+        if (e.errorType !== 'VALUE_MISMATCH') continue;
+        sheet.addRow({
+          rule:     tableLabel(r),
+          source:   sourceLabel(r),
+          target:   targetLabel(r),
+          groupKey: e.groupKey ?? '',
+          rowId:    e.rowIdentifier ?? '',
+          oldCol:   e.oldColumn ?? '',
+          newCol:   e.newColumn ?? '',
+          oldVal:   e.oldValue ?? '',
+          newVal:   e.newValue ?? '',
+          message:  e.message ?? '',
+        });
+      }
+    }
+
+    styleHeader(sheet);
+    autoWidth(sheet);
+  }
+
+  // ----------------------------------------------------------------
+  // Sheet 3 — Row Missing
+  // ----------------------------------------------------------------
+  private buildRowMissingSheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
+    const sheet = wb.addWorksheet('Row_Missing');
+
+    sheet.columns = [
+      { header: 'Rule',       key: 'rule',     width: 30 },
+      { header: 'Source',     key: 'source',   width: 25 },
+      { header: 'Target',     key: 'target',   width: 25 },
+      { header: 'Group Key',  key: 'groupKey', width: 20 },
+      { header: 'Message',    key: 'message',  width: 80 },
+    ];
+
+    for (const r of results) {
+      for (const e of r.errors) {
+        if (e.errorType !== 'ROW_MISSING') continue;
+        sheet.addRow({
+          rule:     tableLabel(r),
+          source:   sourceLabel(r),
+          target:   targetLabel(r),
+          groupKey: e.groupKey ?? '',
+          message:  e.message ?? '',
+        });
+      }
+    }
+
+    styleHeader(sheet);
+    autoWidth(sheet);
+  }
+
+  // ----------------------------------------------------------------
+  // Sheet 4 — Def Violation
+  // ----------------------------------------------------------------
+  private buildDefViolationSheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
+    const sheet = wb.addWorksheet('Def_Violation');
+
+    sheet.columns = [
+      { header: 'Rule',       key: 'rule',     width: 30 },
+      { header: 'Source',     key: 'source',   width: 25 },
+      { header: 'Target',     key: 'target',   width: 25 },
+      { header: 'Def ID',     key: 'defId',    width: 12 },
+      { header: 'Group Key',  key: 'groupKey', width: 20 },
+      { header: 'Message',    key: 'message',  width: 80 },
+    ];
+
+    for (const r of results) {
+      for (const e of r.errors) {
+        if (e.errorType !== 'DEFECT_VIOLATION') continue;
+        sheet.addRow({
+          rule:     tableLabel(r),
+          source:   sourceLabel(r),
+          target:   targetLabel(r),
+          defId:    e.defId ?? '',
+          groupKey: e.groupKey ?? '',
+          message:  e.message ?? '',
+        });
+      }
+    }
+
+    styleHeader(sheet);
+    autoWidth(sheet);
   }
 }

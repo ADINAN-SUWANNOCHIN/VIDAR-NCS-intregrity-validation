@@ -60,9 +60,8 @@ export class ValidationService {
         results.push({
           tableName,
           rowsChecked: 0,
+          pass: 0, fail: 0, skipped: 0,
           total: 0,
-          pass: 0,
-          fail: 0,
           missing: 1,
           timeSpent: Date.now() - start,
           errors: [{ errorType: 'DATA_MISSING', message: `No rule directory found for table ${tableName}` }],
@@ -76,13 +75,12 @@ export class ValidationService {
       if (!commonRule) {
         results.push({
           tableName,
+          rowsChecked: 0,
+          pass: 0, fail: 0, skipped: 0,
           total: 0,
-          pass: 0,
-          fail: 0,
           missing: 1,
           timeSpent: Date.now() - start,
-          rowsChecked: 0,
-        errors: [{ errorType: 'DATA_MISSING', message: `common.yaml not found or parse error for ${tableName}` }],
+          errors: [{ errorType: 'DATA_MISSING', message: `common.yaml not found or parse error for ${tableName}` }],
         });
         this.jobService.incrementDone(jobId);
         continue;
@@ -94,11 +92,15 @@ export class ValidationService {
       // ---- เลือก Strategy ----
       let errors: ValidationError[] = [];
       let rowsChecked = 0;
+      let strategyPassCount = 0;
+      let strategyFailCount = 0;
       try {
         const strategy = this.strategyFactory.create(commonRule.table_info.table_type);
         const result = await strategy.validate({ commonRule, defRules, affectCodeMap });
         errors = result.errors;
         rowsChecked = result.rowsChecked;
+        strategyPassCount = result.passCount;
+        strategyFailCount = result.failCount;
       } catch (err) {
         this.logger.error(`[Job:${jobId}] Strategy error for ${tableName}: ${err.message}`);
         errors = [{ errorType: 'TRANSFORM_ERROR', message: `Runtime error: ${err.message}` }];
@@ -109,15 +111,17 @@ export class ValidationService {
       errors.push(...sumErrors);
 
       // ---- สรุปผล ----
-      const valueErrors = errors.filter((e) => e.errorType === 'VALUE_MISMATCH' || e.errorType === 'DEFECT_VIOLATION');
       const missingErrors = errors.filter((e) => e.errorType === 'ROW_MISSING' || e.errorType === 'COLUMN_MISSING' || e.errorType === 'DATA_MISSING');
 
       results.push({
         tableName,
+        sourceTable: commonRule.table_info.source,
+        targetTable: commonRule.table_info.target,
         rowsChecked,
+        pass: strategyPassCount,
+        fail: strategyFailCount,
+        skipped: Math.max(0, rowsChecked - strategyPassCount - strategyFailCount),
         total: errors.length,
-        pass: errors.length === 0 ? 1 : 0,
-        fail: valueErrors.length,
         missing: missingErrors.length,
         timeSpent: Date.now() - start,
         errors,
@@ -133,8 +137,11 @@ export class ValidationService {
     const summary = results.map((r) => ({
       tableName: r.tableName,
       rowsChecked: r.rowsChecked,
+      pass: r.pass,
+      fail: r.fail,
+      skipped: r.skipped,
       totalErrors: r.total,
-      status: (r.fail === 0 && r.missing === 0 ? 'PASS' : 'FAIL') as 'PASS' | 'FAIL',
+      status: (r.fail === 0 && r.missing === 0 && r.skipped === 0 ? 'PASS' : 'FAIL') as 'PASS' | 'FAIL',
       timeSpentSec: parseFloat((r.timeSpent / 1000).toFixed(2)),
     }));
 

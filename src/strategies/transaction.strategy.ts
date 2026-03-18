@@ -22,9 +22,11 @@ export class TransactionStrategy extends BaseStrategy {
     super(db);
   }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
+    let passCount = 0;
+    let failCount = 0;
     const { commonRule, defRules, affectCodeMap } = ctx;
     const { source, target } = commonRule.table_info;
     const tg = commonRule.transaction_grouping;
@@ -39,24 +41,27 @@ export class TransactionStrategy extends BaseStrategy {
         errorType: 'TRANSFORM_ERROR',
         message: `Table ${source} is TRANSACTION type but has no transaction_grouping in common.yaml`,
       });
-      return { errors, rowsChecked: 0 };
+      return { errors, rowsChecked: 0, passCount: 0, failCount: 0 };
     }
 
     // Composite key mode — different streaming strategy, separate path
     if (tg.composite_key) {
-      return this.validateCompositeKey(ctx);
+      const r = await this.validateCompositeKey(ctx);
+      return { ...r, passCount: r.passCount, failCount: r.failCount };
     }
 
     // Group-key pagination mode — for tables where group rows are scattered in ID order.
     // Anchor-key streaming + carry-over breaks when id_range >> row_count per group.
     if (tg.use_group_pagination) {
-      return this.validateGroupPagination(ctx);
+      const r = await this.validateGroupPagination(ctx);
+      return { ...r, passCount: r.passCount, failCount: r.failCount };
     }
 
     // Sysref-sort mode — page old table sorted by sysref, carry-over at boundary.
     // Same scatter safety as use_group_pagination but ~10× fewer DB round-trips.
     if (tg.use_sysref_sort) {
-      return this.validateSysrefSort(ctx);
+      const r = await this.validateSysrefSort(ctx);
+      return { ...r, passCount: r.passCount, failCount: r.failCount };
     }
 
     const oldKeyCol = tg.keys.old;
@@ -193,6 +198,7 @@ export class TransactionStrategy extends BaseStrategy {
             groupKey,
             message: `Transaction group [${groupKey}] found in source but not in target`,
           });
+          failCount += oldGroup.length;
           continue;
         }
 
@@ -201,7 +207,13 @@ export class TransactionStrategy extends BaseStrategy {
         if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
           errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
         }
-        errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+        const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
+        errors.push(...defErrors);
+        if (groupErrors.length + defErrors.length === 0) {
+          passCount += oldGroup.length;
+        } else {
+          failCount += oldGroup.length;
+        }
       }
 
       // Extra groups in target (only for committed groups)
@@ -229,6 +241,7 @@ export class TransactionStrategy extends BaseStrategy {
           groupKey,
           message: `Transaction group [${groupKey}] found in source but not in target`,
         });
+        failCount += oldGroup.length;
         continue;
       }
       const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
@@ -236,7 +249,13 @@ export class TransactionStrategy extends BaseStrategy {
       if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
         errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
       }
-      errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+      const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
+      errors.push(...defErrors);
+      if (groupErrors.length + defErrors.length === 0) {
+        passCount += oldGroup.length;
+      } else {
+        failCount += oldGroup.length;
+      }
     }
 
     // Extra groups in target at chunk boundary
@@ -250,8 +269,8 @@ export class TransactionStrategy extends BaseStrategy {
       }
     }
 
-    this.logger.log(`[TXN] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
-    return { errors, rowsChecked };
+    this.logger.log(`[TXN] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 
   // ----------------------------------------------------------------
@@ -281,9 +300,11 @@ export class TransactionStrategy extends BaseStrategy {
    */
   private async validateCompositeKey(
     ctx: ValidationContext,
-  ): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  ): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
+    let passCount = 0;
+    let failCount = 0;
     const { commonRule, defRules, affectCodeMap } = ctx;
     const { source, target } = commonRule.table_info;
     const tg = commonRule.transaction_grouping!;
@@ -418,10 +439,18 @@ export class TransactionStrategy extends BaseStrategy {
               groupKey: ckNew,
               message: `Composite group [${ckNew}] found in source (old ${ck.old_col}=${acct}) but not in target`,
             });
+            failCount += oldGroup.length;
             continue;
           }
-          errors.push(...this.validateGroup(ckNew, oldGroup, newGroup, sm, tolerance, noisyMap));
-          errors.push(...this.runDefRules(ckNew, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+          const groupErrors = this.validateGroup(ckNew, oldGroup, newGroup, sm, tolerance, noisyMap);
+          errors.push(...groupErrors);
+          const defErrors = this.runDefRules(ckNew, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
+          errors.push(...defErrors);
+          if (groupErrors.length + defErrors.length === 0) {
+            passCount += oldGroup.length;
+          } else {
+            failCount += oldGroup.length;
+          }
         }
 
         // Report extra new rows with no corresponding old source
@@ -442,8 +471,8 @@ export class TransactionStrategy extends BaseStrategy {
       await this.db.dropTargetCache(tempName);
     }
 
-    this.logger.log(`[TXN-CK] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
-    return { errors, rowsChecked };
+    this.logger.log(`[TXN-CK] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 
   // ----------------------------------------------------------------
@@ -465,9 +494,11 @@ export class TransactionStrategy extends BaseStrategy {
    */
   private async validateGroupPagination(
     ctx: ValidationContext,
-  ): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  ): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
+    let passCount = 0;
+    let failCount = 0;
     const { commonRule, defRules, affectCodeMap } = ctx;
     const { source, target } = commonRule.table_info;
     const tg = commonRule.transaction_grouping!;
@@ -570,6 +601,7 @@ export class TransactionStrategy extends BaseStrategy {
             groupKey,
             message: `Transaction group [${groupKey}] found in source but not in target`,
           });
+          failCount += oldGroup.length;
           continue;
         }
         const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
@@ -577,7 +609,13 @@ export class TransactionStrategy extends BaseStrategy {
         if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
           errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
         }
-        errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+        const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
+        errors.push(...defErrors);
+        if (groupErrors.length + defErrors.length === 0) {
+          passCount += oldGroup.length;
+        } else {
+          failCount += oldGroup.length;
+        }
       }
 
       // Report extra groups in target not present in source
@@ -595,8 +633,8 @@ export class TransactionStrategy extends BaseStrategy {
       if (groupKeys.length < GROUP_BATCH) break;
     }
 
-    this.logger.log(`[TXN-GP] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
-    return { errors, rowsChecked };
+    this.logger.log(`[TXN-GP] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 
   // ----------------------------------------------------------------
@@ -612,9 +650,11 @@ export class TransactionStrategy extends BaseStrategy {
    */
   private async validateSysrefSort(
     ctx: ValidationContext,
-  ): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  ): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
+    let passCount = 0;
+    let failCount = 0;
     const { commonRule, defRules, affectCodeMap } = ctx;
     const { source, target } = commonRule.table_info;
     const tg = commonRule.transaction_grouping!;
@@ -724,6 +764,7 @@ export class TransactionStrategy extends BaseStrategy {
         const newGroup = newGroupMap.get(groupKey) ?? [];
         if (newGroup.length === 0) {
           errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
+          failCount += oldGroup.length;
           continue;
         }
         const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
@@ -731,7 +772,13 @@ export class TransactionStrategy extends BaseStrategy {
         if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
           errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
         }
-        errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+        const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
+        errors.push(...defErrors);
+        if (groupErrors.length + defErrors.length === 0) {
+          passCount += oldGroup.length;
+        } else {
+          failCount += oldGroup.length;
+        }
       }
 
       for (const [groupKey] of newGroupMap) {
@@ -750,6 +797,7 @@ export class TransactionStrategy extends BaseStrategy {
       const newGroup = carryNew.get(groupKey) ?? [];
       if (newGroup.length === 0) {
         errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
+        failCount += oldGroup.length;
         continue;
       }
       const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
@@ -757,7 +805,13 @@ export class TransactionStrategy extends BaseStrategy {
       if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
         errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
       }
-      errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance));
+      const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
+      errors.push(...defErrors);
+      if (groupErrors.length + defErrors.length === 0) {
+        passCount += oldGroup.length;
+      } else {
+        failCount += oldGroup.length;
+      }
     }
     for (const [groupKey] of carryNew) {
       if (!carryOld.has(groupKey)) {
@@ -768,8 +822,8 @@ export class TransactionStrategy extends BaseStrategy {
       await this.db.dropSourceCache(tempName);
     }
 
-    this.logger.log(`[TXN-SS] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
-    return { errors, rowsChecked };
+    this.logger.log(`[TXN-SS] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 
   /**
@@ -800,17 +854,24 @@ export class TransactionStrategy extends BaseStrategy {
 
     for (const mapping of sm.exact_matches ?? []) {
       if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
-      const oldTotal = this.sumColumn(oldGroup, mapping.old);
-      const newTotal = this.sumColumn(newGroup, mapping.new);
-      if (oldTotal !== null && newTotal !== null && Math.abs(oldTotal - newTotal) > tolerance) {
+      // Fix 5: use distinct-value set comparison instead of SUM.
+      // SUM produces false positives for identifier columns (accountno, billno, etc.)
+      // when old has 1 row but new has N rows with the same value (row-split migration):
+      //   SUM(old)=X vs SUM(new)=N*X → false mismatch even though all values equal X.
+      // Distinct-set: {X} == {X} → correctly passes.
+      const oldVals = [...new Set(oldGroup.map((r) => String(r[mapping.old] ?? '').trim()))]
+        .filter((v) => v !== '').sort().join('|');
+      const newVals = [...new Set(newGroup.map((r) => String(r[mapping.new] ?? '').trim()))]
+        .filter((v) => v !== '').sort().join('|');
+      if (oldVals !== '' && newVals !== '' && oldVals !== newVals) {
         errors.push({
           errorType: 'VALUE_MISMATCH',
           oldColumn: mapping.old,
           newColumn: mapping.new,
-          oldValue: oldTotal,
-          newValue: newTotal,
+          oldValue: oldVals,
+          newValue: newVals,
           groupKey,
-          message: `Group sum mismatch [${mapping.old}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
+          message: `Value mismatch [${mapping.old}]: "${oldVals}" ≠ "${newVals}" (group: ${groupKey})`,
         });
       }
     }

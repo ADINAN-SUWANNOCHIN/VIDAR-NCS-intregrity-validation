@@ -26,7 +26,12 @@ export abstract class BaseStrategy {
     this.logger = new Logger(this.constructor.name);
   }
 
-  abstract validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }>;
+  abstract validate(ctx: ValidationContext): Promise<{
+    errors: ValidationError[];
+    rowsChecked: number;
+    passCount: number;  // source rows in groups with 0 errors (independent counter — use rowsChecked - (passCount + failCount) to detect skipped rows)
+    failCount: number;  // source rows in groups with ≥1 error (independent counter)
+  }>;
 
   // ----------------------------------------------------------------
   // Schema helpers
@@ -643,6 +648,8 @@ export abstract class BaseStrategy {
    * Normalizes a fingerprint column value so old and new produce the same string.
    * - Date object (mssql datetime2) → toISOString().slice(0,10)
    * - ISO nvarchar "2024-01-15T..." → extract date before T
+   * - SQL nvarchar "2024-01-15 00:00:00..." → extract date part (Fix D: must check BEFORE parseFloat
+   *   because parseFloat("2009-03-30 00:00:00") = 2009, losing the full date)
    * - Numeric string / number → parseFloat (strips trailing zeros)
    * - Other → trim to string
    */
@@ -651,6 +658,8 @@ export abstract class BaseStrategy {
     const s = String(v ?? '').trim();
     const dateMatch = s.match(/^(\d{4}-\d{2}-\d{2})T/);
     if (dateMatch) return dateMatch[1];
+    const sqlDateMatch = s.match(/^(\d{4}-\d{2}-\d{2})(?:\s|$)/);
+    if (sqlDateMatch) return sqlDateMatch[1];
     const n = parseFloat(s);
     if (!isNaN(n) && s !== '') return String(n);
     return s;

@@ -96,33 +96,37 @@ export class ValidationController {
   }
 
   /**
-   * GET /validation/download/:jobId?file=Summary_Report.csv
-   * Streams a report CSV file as a download attachment.
-   * The file param must match a filename in the job's reportPaths (prevents path traversal).
+   * GET /validation/download/:jobId
+   * Streams the job's report file as a download attachment.
+   * No query param needed — serves the single Validation_Report.xlsx automatically.
+   * Optional ?file= param still accepted for backwards compatibility.
    *
    * Example:
-   *   GET /validation/download/abc123?file=Summary_Report.csv
-   *   GET /validation/download/abc123?file=Detail_Log_conv%24vinpahistory.csv
+   *   GET /validation/download/abc123
    */
   @Get('download/:jobId')
   async downloadReport(
     @Param('jobId') jobId: string,
-    @Query('file') file: string,
+    @Query('file') file: string | undefined,
     @Res() res: express.Response,
   ): Promise<void> {
-    if (!file) throw new BadRequestException('Query param "file" is required');
-
     const job = this.jobService.getStatus(jobId);
     if (!job) throw new NotFoundException(`Job ${jobId} not found`);
     if (job.status !== 'DONE') throw new BadRequestException(`Job is still ${job.status}`);
 
-    // Only serve files that are recorded in the job's reportPaths
-    const reportPath = (job.reportPaths ?? []).find(
-      (p) => path.basename(p) === path.basename(file),
-    );
+    const reportPaths = job.reportPaths ?? [];
+    if (reportPaths.length === 0) {
+      throw new NotFoundException(`No report files found for job ${jobId}`);
+    }
+
+    // If ?file= specified, match by filename. Otherwise serve the first (and only) report.
+    const reportPath = file
+      ? reportPaths.find((p) => path.basename(p) === path.basename(file))
+      : reportPaths[0];
+
     if (!reportPath) {
       throw new NotFoundException(
-        `File "${file}" not found in job reports. Available: ${(job.reportPaths ?? []).map((p) => path.basename(p)).join(', ')}`,
+        `File "${file}" not found in job reports. Available: ${reportPaths.map((p) => path.basename(p)).join(', ')}`,
       );
     }
 
@@ -132,7 +136,10 @@ export class ValidationController {
     }
 
     const filename = path.basename(absPath);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    const contentType = filename.endsWith('.xlsx')
+      ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      : 'text/csv; charset=utf-8';
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     fs.createReadStream(absPath).pipe(res);
   }

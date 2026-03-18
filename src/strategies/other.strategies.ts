@@ -13,7 +13,7 @@ import { TransformUtils } from './transform.utils';
 export class SplitStrategy extends BaseStrategy {
   constructor(db: DatabaseService) { super(db); }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
     const { commonRule } = ctx;
@@ -98,8 +98,11 @@ export class SplitStrategy extends BaseStrategy {
       }
     }
 
-    this.logger.log(`[SPLIT] Done: ${errors.length} error(s), ${rowsChecked} values checked`);
-    return { errors, rowsChecked };
+    // SPLIT has no groups — each errored value is 1 source row. passCount = clean source rows.
+    const failCount = errors.filter((e) => e.oldColumn && e.errorType === 'ROW_MISSING').length;
+    const passCount = Math.max(0, rowsChecked - failCount);
+    this.logger.log(`[SPLIT] Done: ${errors.length} error(s), ${rowsChecked} values checked, pass=${passCount} fail=${failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 }
 
@@ -116,7 +119,7 @@ export class SplitStrategy extends BaseStrategy {
 export class HeaderStrategy extends BaseStrategy {
   constructor(db: DatabaseService) { super(db); }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
     const { commonRule } = ctx;
@@ -154,7 +157,7 @@ export class HeaderStrategy extends BaseStrategy {
         });
       }
 
-      return { errors, rowsChecked: 0 };
+      return { errors, rowsChecked: 0, passCount: 0, failCount: 0 };
     }
 
     const oldIdCol = pc.identity_key.old;
@@ -264,8 +267,12 @@ export class HeaderStrategy extends BaseStrategy {
       if (identityKeys.length < chunkSize) break;
     }
 
-    this.logger.log(`[HEADER] Done: ${errors.length} error(s), ${rowsChecked} old rows checked`);
-    return { errors, rowsChecked };
+    // passCount/failCount: post-hoc from distinct failing identifiers.
+    const failingIds = new Set(errors.filter((e) => e.rowIdentifier).map((e) => e.rowIdentifier!));
+    const failCount = failingIds.size;
+    const passCount = Math.max(0, rowsChecked - failCount);
+    this.logger.log(`[HEADER] Done: ${errors.length} error(s), ${rowsChecked} old rows checked, pass=${passCount} fail=${failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 }
 
@@ -280,9 +287,11 @@ export class HeaderStrategy extends BaseStrategy {
 export class UnionStrategy extends BaseStrategy {
   constructor(db: DatabaseService) { super(db); }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
+    let passCount = 0;
+    let failCount = 0;
     const { commonRule } = ctx;
     const { source, target } = commonRule.table_info;
     const sources = source.split(',').map((s) => s.trim());
@@ -300,7 +309,7 @@ export class UnionStrategy extends BaseStrategy {
         errorType: 'TRANSFORM_ERROR',
         message: `UNION table has no transaction_grouping defined — cannot correlate source rows to target`,
       });
-      return { errors, rowsChecked: 0 };
+      return { errors, rowsChecked: 0, passCount: 0, failCount: 0 };
     }
 
     const oldKeyCol = tg.keys.old;
@@ -450,7 +459,9 @@ export class UnionStrategy extends BaseStrategy {
         // Compare all committed groups
         for (const [groupKey, oldGroup] of oldGroupMap) {
           if (groupKey === carryKey) continue;
+          const errsBefore = errors.length;
           compareUnionGroup(src, groupKey, oldGroup, newGroupMap.get(groupKey) ?? []);
+          if (errors.length > errsBefore) { failCount += oldGroup.length; } else { passCount += oldGroup.length; }
         }
 
         // Extra groups in target not matched by this source's committed groups
@@ -471,7 +482,9 @@ export class UnionStrategy extends BaseStrategy {
 
       // Flush remaining carry for this source
       for (const [groupKey, oldGroup] of carryOld) {
+        const errsBefore = errors.length;
         compareUnionGroup(src, groupKey, oldGroup, carryNew.get(groupKey) ?? []);
+        if (errors.length > errsBefore) { failCount += oldGroup.length; } else { passCount += oldGroup.length; }
       }
 
       // Extra groups still in carry target
@@ -486,8 +499,8 @@ export class UnionStrategy extends BaseStrategy {
       }
     }
 
-    this.logger.log(`[UNION] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
-    return { errors, rowsChecked };
+    this.logger.log(`[UNION] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 
   private sumOrFirst(rows: Record<string, unknown>[], col: string): unknown {
@@ -526,9 +539,11 @@ export class UnionStrategy extends BaseStrategy {
 export class MultipleStrategy extends BaseStrategy {
   constructor(db: DatabaseService) { super(db); }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
+    let passCount = 0;
+    let failCount = 0;
     const { commonRule } = ctx;
     const { source, target } = commonRule.table_info;
     const sm = commonRule.schema_mappings;
@@ -866,11 +881,15 @@ export class MultipleStrategy extends BaseStrategy {
                 groupKey,
                 message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}`,
               });
+              failCount += oldGroup.length;
               continue;
             }
             const pairSmCo: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
-            errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmCo, tolerance, noisyMap));
-            errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+            const ge = this.validateGroup(groupKey, oldGroup, newGroup, pairSmCo, tolerance, noisyMap);
+            errors.push(...ge);
+            const de = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
+            errors.push(...de);
+            if (ge.length + de.length === 0) { passCount += oldGroup.length; } else { failCount += oldGroup.length; }
           }
 
           // Extra groups in target not present in this source
@@ -898,11 +917,15 @@ export class MultipleStrategy extends BaseStrategy {
               groupKey,
               message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}`,
             });
+            failCount += oldGroup.length;
             continue;
           }
           const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
-          errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap));
-          errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+          const ge = this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap);
+          errors.push(...ge);
+          const de = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
+          errors.push(...de);
+          if (ge.length + de.length === 0) { passCount += oldGroup.length; } else { failCount += oldGroup.length; }
         }
         for (const [groupKey] of carryNew) {
           if (!carryOld.has(groupKey)) {
@@ -915,8 +938,8 @@ export class MultipleStrategy extends BaseStrategy {
         }
       }
 
-      this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
-      return { errors, rowsChecked };
+      this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
+      return { errors, rowsChecked, passCount, failCount };
     }
 
     // ---- Row-mode: no transaction_grouping → 1:1 anchor key lookup (original behavior) ----
@@ -1032,8 +1055,12 @@ export class MultipleStrategy extends BaseStrategy {
       }
     }
 
-    this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked`);
-    return { errors, rowsChecked };
+    // Row-mode: post-hoc passCount/failCount from distinct failing rowIdentifiers
+    const rowFailKeys = new Set(errors.filter((e) => e.rowIdentifier).map((e) => e.rowIdentifier!));
+    failCount = rowFailKeys.size;
+    passCount = Math.max(0, rowsChecked - failCount);
+    this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount}`);
+    return { errors, rowsChecked, passCount, failCount };
   }
 
   // ----------------------------------------------------------------
