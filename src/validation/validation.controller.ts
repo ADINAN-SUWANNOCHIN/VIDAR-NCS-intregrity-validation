@@ -3,12 +3,18 @@ import {
   Post,
   Get,
   Param,
+  Query,
   Body,
+  Res,
   NotFoundException,
+  BadRequestException,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { IsArray, IsOptional, IsString } from 'class-validator';
+import * as express from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import { ValidationService } from './validation.service';
 import { PresetService } from './preset.service';
 import { JobService } from '../job/job.service';
@@ -107,6 +113,48 @@ export class ValidationController {
       reportPaths: job.reportPaths ?? [],
       message: 'Reports ready',
     };
+  }
+
+  /**
+   * GET /validation/download/:jobId?file=Summary_Report.csv
+   * Streams a report CSV file as a download attachment.
+   * The file param must match a filename in the job's reportPaths (prevents path traversal).
+   *
+   * Example:
+   *   GET /validation/download/abc123?file=Summary_Report.csv
+   *   GET /validation/download/abc123?file=Detail_Log_conv%24vinpahistory.csv
+   */
+  @Get('download/:jobId')
+  async downloadReport(
+    @Param('jobId') jobId: string,
+    @Query('file') file: string,
+    @Res() res: express.Response,
+  ): Promise<void> {
+    if (!file) throw new BadRequestException('Query param "file" is required');
+
+    const job = this.jobService.getStatus(jobId);
+    if (!job) throw new NotFoundException(`Job ${jobId} not found`);
+    if (job.status !== 'DONE') throw new BadRequestException(`Job is still ${job.status}`);
+
+    // Only serve files that are recorded in the job's reportPaths
+    const reportPath = (job.reportPaths ?? []).find(
+      (p) => path.basename(p) === path.basename(file),
+    );
+    if (!reportPath) {
+      throw new NotFoundException(
+        `File "${file}" not found in job reports. Available: ${(job.reportPaths ?? []).map((p) => path.basename(p)).join(', ')}`,
+      );
+    }
+
+    const absPath = path.resolve(reportPath);
+    if (!fs.existsSync(absPath)) {
+      throw new NotFoundException(`Report file not found on disk: ${reportPath}`);
+    }
+
+    const filename = path.basename(absPath);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    fs.createReadStream(absPath).pipe(res);
   }
 
   /**

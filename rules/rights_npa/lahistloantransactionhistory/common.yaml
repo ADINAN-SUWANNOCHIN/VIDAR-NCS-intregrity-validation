@@ -4,7 +4,7 @@
 #   → la$lahistloantransactionhistory
 #
 # Row counts (verified from data discovery):
-#   conv$vinpahistory:          2,556,928 rows
+#   conv$vinpahistory:          2,776,891 rows (2,775,965 successlv2=true; 926 excluded by source_filter)
 #   conv$vinpalrentalhistory:         147 rows
 #   conv$vinpalrtrespasserhist:        11 rows
 #   la$lahistloantransactionhistory: (sum of all 3)
@@ -38,6 +38,10 @@ table_info:
   source: "[ncs-conv-aging].dbo.[conv$vinpahistory],[ncs-conv-aging].dbo.[conv$vinpalrentalhistory],[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
   target: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
   table_type: MULTIPLE
+  # Exclude rows that failed lv2 migration (successlv2=false).
+  # vinpahistory: 926 rows with successlv2=false are not in new table — filtering prevents false VALUE_MISMATCH.
+  # rental + respasserhist: all rows have successlv2=true → filter is a no-op for them.
+  source_filter: "successlv2 = 1"
 
 # anchor_key: used ONLY for keyset pagination ordering within each source table.
 # In group-mode (transaction_grouping defined), new rows are fetched by group key — NOT by anchorKeyNew.
@@ -106,9 +110,6 @@ schema_mappings:
 
     - old: currentbalanceb4t
       new: currentbalanceb4t
-
-    - old: nextpaymentduedateb4t
-      new: nextpaymentduedateb4t
 
     - old: planno
       new: planno
@@ -262,6 +263,13 @@ schema_mappings:
       new: gldate
       transform_rule: DATE_TO_DATETIME
 
+    # nextpaymentduedateb4t: old=nvarchar "YYYY-MM-DD", new=datetime2
+    # DATE_TO_DATETIME documents the correct transform. Note: in group-mode sumColumn() skips
+    # date strings (NaN → null) so this is not actively compared — use concat_matches if needed.
+    - old: nextpaymentduedateb4t
+      new: nextpaymentduedateb4t
+      transform_rule: DATE_TO_DATETIME
+
     # NOTE: startinterestdate, endinterestdate — excluded: old="" nvarchar vs new=null datetime2
     # NOTE: noofdays — excluded: old="" nvarchar vs new=null int (empty-vs-null edge case)
     # NOTE: interestrate — excluded: old="" empty vs new=0 decimal (empty-as-zero edge case)
@@ -273,3 +281,10 @@ schema_mappings:
     - old_cols: [billno, newaccountno]
       new: billno
       separator: ""
+
+    # orgsystemreferencenumber: present when sysref has R-prefix (reversal transactions).
+    # Pattern: old sysref = "RITEM6408003300", orgsysref = "ITEM6408003300" (original without R).
+    # Confirmed: new.originaljournalseqno = same value. 1,896 groups affected (~0.3%).
+    # nvarchar on both sides → concat_matches string comparison is safe.
+    - old_cols: [orgsystemreferencenumber]
+      new: originaljournalseqno
