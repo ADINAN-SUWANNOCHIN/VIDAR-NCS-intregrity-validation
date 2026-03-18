@@ -96,26 +96,6 @@ export class ValidationController {
   }
 
   /**
-   * GET /validation/report/:jobId
-   */
-  @Get('report/:jobId')
-  async getReport(
-    @Param('jobId') jobId: string,
-  ): Promise<{ reportPaths: string[]; message: string }> {
-    const job = this.jobService.getStatus(jobId);
-    if (!job) throw new NotFoundException(`Job ${jobId} not found`);
-
-    if (job.status !== 'DONE') {
-      return { reportPaths: [], message: `Job is still ${job.status}` };
-    }
-
-    return {
-      reportPaths: job.reportPaths ?? [],
-      message: 'Reports ready',
-    };
-  }
-
-  /**
    * GET /validation/download/:jobId?file=Summary_Report.csv
    * Streams a report CSV file as a download attachment.
    * The file param must match a filename in the job's reportPaths (prevents path traversal).
