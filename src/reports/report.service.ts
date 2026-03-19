@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as ExcelJS from 'exceljs';
 import { ValidationError } from '../rules/rule.types';
 
 export interface TableResult {
@@ -19,49 +18,6 @@ export interface TableResult {
   errors: ValidationError[];
 }
 
-// ----------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------
-
-const HEADER_FILL: ExcelJS.Fill = {
-  type: 'pattern',
-  pattern: 'solid',
-  fgColor: { argb: 'FF2F5496' },
-};
-
-const HEADER_FONT: Partial<ExcelJS.Font> = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
-
-function styleHeader(sheet: ExcelJS.Worksheet): void {
-  const header = sheet.getRow(1);
-  header.font = HEADER_FONT;
-  header.fill = HEADER_FILL;
-  header.alignment = { vertical: 'middle', horizontal: 'center', wrapText: false };
-  header.height = 20;
-  sheet.views = [{ state: 'frozen', ySplit: 1 }];
-  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: sheet.columnCount } };
-}
-
-function autoWidth(sheet: ExcelJS.Worksheet, minWidth = 10, maxWidth = 60): void {
-  sheet.columns.forEach((col) => {
-    let max = minWidth;
-    col.eachCell?.({ includeEmpty: false }, (cell) => {
-      const len = String(cell.value ?? '').length;
-      if (len > max) max = len;
-    });
-    col.width = Math.min(max + 2, maxWidth);
-  });
-}
-
-function tableLabel(r: TableResult): string {
-  return r.tableName;
-}
-function sourceLabel(r: TableResult): string {
-  return r.sourceTable ?? '';
-}
-function targetLabel(r: TableResult): string {
-  return r.targetTable ?? '';
-}
-
 @Injectable()
 export class ReportService {
   private readonly logger = new Logger(ReportService.name);
@@ -76,181 +32,157 @@ export class ReportService {
     const jobDir = path.join(this.reportsDir, jobId);
     fs.mkdirSync(jobDir, { recursive: true });
 
-    const xlsxPath = path.join(jobDir, 'Validation_Report.xlsx');
-    const workbook = new ExcelJS.Workbook();
-    workbook.creator = 'VIDAR DV Engine';
-    workbook.created = new Date();
+    const summaryPath = path.join(jobDir, 'Summary_Report.csv');
+    const detailPath  = path.join(jobDir, 'Detail_Log.csv');
 
-    this.buildSummarySheet(workbook, results);
-    this.buildValueMismatchSheet(workbook, results);
-    this.buildRowMissingSheet(workbook, results);
-    this.buildDefViolationSheet(workbook, results);
+    await this.writeSummary(summaryPath, jobId, results);
+    await this.writeDetail(detailPath, results);
 
-    await workbook.xlsx.writeFile(xlsxPath);
-    this.logger.log(`Excel report written: ${xlsxPath}`);
-
-    return [xlsxPath];
+    this.logger.log(`Reports written → ${summaryPath} | ${detailPath}`);
+    return [summaryPath, detailPath];
   }
 
   // ----------------------------------------------------------------
-  // Sheet 1 — Summary
+  // File 1: Summary_Report.csv
+  // One row per validated table.
+  // Opens correctly in Excel (UTF-8 BOM, CRLF line endings).
   // ----------------------------------------------------------------
-  private buildSummarySheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
-    const sheet = wb.addWorksheet('Summary');
+  private async writeSummary(
+    filePath: string,
+    jobId: string,
+    results: TableResult[],
+  ): Promise<void> {
+    const ws = fs.createWriteStream(filePath, { encoding: 'utf8' });
+    ws.write('\uFEFF'); // UTF-8 BOM — lets Excel open Thai/unicode without encoding dialog
 
-    sheet.columns = [
-      { header: 'Rule',           key: 'rule',        width: 30 },
-      { header: 'Source Table',   key: 'source',      width: 28 },
-      { header: 'Target Table',   key: 'target',      width: 28 },
-      { header: 'Rows Checked',   key: 'rowsChecked', width: 14 },
-      { header: 'Pass (rows)',    key: 'pass',        width: 12 },
-      { header: 'Fail (rows)',    key: 'fail',        width: 12 },
-      { header: 'Skipped',        key: 'skipped',     width: 10 },
-      { header: 'Total Errors',   key: 'total',       width: 13 },
-      { header: 'Missing',        key: 'missing',     width: 10 },
-      { header: 'Time (sec)',     key: 'timeSec',     width: 11 },
-      { header: 'Status',         key: 'status',      width: 10 },
-      { header: 'Remarks',        key: 'remarks',     width: 50 },
-    ];
+    // ---- Job meta block ----
+    const generatedAt = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
+    const passCount   = results.filter(r => r.fail === 0 && r.missing === 0 && r.skipped === 0).length;
+    const failCount   = results.length - passCount;
 
+    ws.write(csvRow(['Job ID',       jobId]));
+    ws.write(csvRow(['Generated',    generatedAt]));
+    ws.write(csvRow(['Total Tables', results.length]));
+    ws.write(csvRow(['Overall PASS', passCount]));
+    ws.write(csvRow(['Overall FAIL', failCount]));
+    ws.write('\r\n'); // blank separator line
+
+    // ---- Column headers ----
+    ws.write(csvRow([
+      'Rule',
+      'Source Table',
+      'Target Table',
+      'Status',
+      'Rows Checked',
+      'Pass (rows)',
+      'Fail (rows)',
+      'Skipped',
+      'Total Errors',
+      'Missing',
+      'Time (sec)',
+      'Remarks',
+    ]));
+
+    // ---- Data rows ----
     for (const r of results) {
       const status = r.fail === 0 && r.missing === 0 && r.skipped === 0 ? 'PASS' : 'FAIL';
-      const remarkErrors = r.errors.filter((e) =>
-        ['COLUMN_MISSING', 'DATA_MISSING', 'TRANSFORM_ERROR'].includes(e.errorType),
-      );
-      const remarks = remarkErrors.map((e) => e.message).join(' | ');
+      const remarks = r.errors
+        .filter(e => ['COLUMN_MISSING', 'DATA_MISSING', 'TRANSFORM_ERROR'].includes(e.errorType))
+        .map(e => e.message)
+        .join(' | ');
 
-      const row = sheet.addRow({
-        rule:        tableLabel(r),
-        source:      sourceLabel(r),
-        target:      targetLabel(r),
-        rowsChecked: r.rowsChecked,
-        pass:        r.pass,
-        fail:        r.fail,
-        skipped:     r.skipped,
-        total:       r.total,
-        missing:     r.missing,
-        timeSec:     parseFloat((r.timeSpent / 1000).toFixed(2)),
+      ws.write(csvRow([
+        r.tableName,
+        r.sourceTable ?? '',
+        r.targetTable ?? '',
         status,
+        r.rowsChecked,
+        r.pass,
+        r.fail,
+        r.skipped,
+        r.total,
+        r.missing,
+        (r.timeSpent / 1000).toFixed(2),
         remarks,
-      });
-
-      // Colour-code status cell
-      const statusCell = row.getCell('status');
-      statusCell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-      statusCell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: status === 'PASS' ? 'FF1F7A45' : 'FFC00000' },
-      };
-      statusCell.alignment = { horizontal: 'center' };
+      ]));
     }
 
-    styleHeader(sheet);
+    await closeStream(ws);
   }
 
   // ----------------------------------------------------------------
-  // Sheet 2 — Value Mismatch
+  // File 2: Detail_Log.csv
+  // One row per error across all tables — all error types combined.
+  // Filter by "Error Type" column in Excel to focus on one type.
+  // Streamed line by line — no memory spike regardless of error count.
   // ----------------------------------------------------------------
-  private buildValueMismatchSheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
-    const sheet = wb.addWorksheet('Value_Mismatch');
+  private async writeDetail(filePath: string, results: TableResult[]): Promise<void> {
+    const ws = fs.createWriteStream(filePath, { encoding: 'utf8' });
+    ws.write('\uFEFF');
 
-    sheet.columns = [
-      { header: 'Rule',        key: 'rule',      width: 30 },
-      { header: 'Source',      key: 'source',    width: 25 },
-      { header: 'Target',      key: 'target',    width: 25 },
-      { header: 'Group Key',   key: 'groupKey',  width: 20 },
-      { header: 'Row ID',      key: 'rowId',     width: 15 },
-      { header: 'Old Column',  key: 'oldCol',    width: 22 },
-      { header: 'New Column',  key: 'newCol',    width: 22 },
-      { header: 'Old Value',   key: 'oldVal',    width: 20 },
-      { header: 'New Value',   key: 'newVal',    width: 20 },
-      { header: 'Message',     key: 'message',   width: 60 },
-    ];
+    // ---- Column headers ----
+    ws.write(csvRow([
+      'Rule',
+      'Source Table',
+      'Target Table',
+      'Error Type',
+      'Group Key',
+      'Row ID',
+      'Old Column',
+      'New Column',
+      'Old Value',
+      'New Value',
+      'Def ID',
+      'Message',
+    ]));
 
+    // ---- Data rows ----
     for (const r of results) {
       for (const e of r.errors) {
-        if (e.errorType !== 'VALUE_MISMATCH') continue;
-        sheet.addRow({
-          rule:     tableLabel(r),
-          source:   sourceLabel(r),
-          target:   targetLabel(r),
-          groupKey: e.groupKey ?? '',
-          rowId:    e.rowIdentifier ?? '',
-          oldCol:   e.oldColumn ?? '',
-          newCol:   e.newColumn ?? '',
-          oldVal:   e.oldValue ?? '',
-          newVal:   e.newValue ?? '',
-          message:  e.message ?? '',
-        });
+        ws.write(csvRow([
+          r.tableName,
+          r.sourceTable ?? '',
+          r.targetTable ?? '',
+          e.errorType,
+          e.groupKey      ?? '',
+          e.rowIdentifier ?? '',
+          e.oldColumn     ?? '',
+          e.newColumn     ?? '',
+          e.oldValue != null ? String(e.oldValue) : '',
+          e.newValue != null ? String(e.newValue) : '',
+          e.defId   ?? '',
+          e.message,
+        ]));
       }
     }
 
-    styleHeader(sheet);
-    autoWidth(sheet);
+    await closeStream(ws);
   }
+}
 
-  // ----------------------------------------------------------------
-  // Sheet 3 — Row Missing
-  // ----------------------------------------------------------------
-  private buildRowMissingSheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
-    const sheet = wb.addWorksheet('Row_Missing');
+// ----------------------------------------------------------------
+// CSV helpers
+// ----------------------------------------------------------------
 
-    sheet.columns = [
-      { header: 'Rule',       key: 'rule',     width: 30 },
-      { header: 'Source',     key: 'source',   width: 25 },
-      { header: 'Target',     key: 'target',   width: 25 },
-      { header: 'Group Key',  key: 'groupKey', width: 20 },
-      { header: 'Message',    key: 'message',  width: 80 },
-    ];
-
-    for (const r of results) {
-      for (const e of r.errors) {
-        if (e.errorType !== 'ROW_MISSING') continue;
-        sheet.addRow({
-          rule:     tableLabel(r),
-          source:   sourceLabel(r),
-          target:   targetLabel(r),
-          groupKey: e.groupKey ?? '',
-          message:  e.message ?? '',
-        });
-      }
-    }
-
-    styleHeader(sheet);
-    autoWidth(sheet);
+/** Escape one cell value per RFC 4180. */
+function csvCell(v: unknown): string {
+  const s = String(v ?? '');
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return '"' + s.replace(/"/g, '""') + '"';
   }
+  return s;
+}
 
-  // ----------------------------------------------------------------
-  // Sheet 4 — Def Violation
-  // ----------------------------------------------------------------
-  private buildDefViolationSheet(wb: ExcelJS.Workbook, results: TableResult[]): void {
-    const sheet = wb.addWorksheet('Def_Violation');
+/** Join cells into a CRLF-terminated CSV row. */
+function csvRow(values: unknown[]): string {
+  return values.map(csvCell).join(',') + '\r\n';
+}
 
-    sheet.columns = [
-      { header: 'Rule',       key: 'rule',     width: 30 },
-      { header: 'Source',     key: 'source',   width: 25 },
-      { header: 'Target',     key: 'target',   width: 25 },
-      { header: 'Def ID',     key: 'defId',    width: 12 },
-      { header: 'Group Key',  key: 'groupKey', width: 20 },
-      { header: 'Message',    key: 'message',  width: 80 },
-    ];
-
-    for (const r of results) {
-      for (const e of r.errors) {
-        if (e.errorType !== 'DEFECT_VIOLATION') continue;
-        sheet.addRow({
-          rule:     tableLabel(r),
-          source:   sourceLabel(r),
-          target:   targetLabel(r),
-          defId:    e.defId ?? '',
-          groupKey: e.groupKey ?? '',
-          message:  e.message ?? '',
-        });
-      }
-    }
-
-    styleHeader(sheet);
-    autoWidth(sheet);
-  }
+/** Cleanly end a WriteStream and resolve when fully flushed to disk. */
+function closeStream(ws: fs.WriteStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ws.end();
+    ws.on('finish', resolve);
+    ws.on('error', reject);
+  });
 }
