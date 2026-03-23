@@ -60,7 +60,9 @@ export class ValidationService {
         results.push({
           tableName,
           rowsChecked: 0,
-          pass: 0, fail: 0, skipped: 0,
+          pass: 0,
+          fail: 0,
+          skipped: 0,
           total: 0,
           missing: 1,
           timeSpent: Date.now() - start,
@@ -76,7 +78,9 @@ export class ValidationService {
         results.push({
           tableName,
           rowsChecked: 0,
-          pass: 0, fail: 0, skipped: 0,
+          pass: 0,
+          fail: 0,
+          skipped: 0,
           total: 0,
           missing: 1,
           timeSpent: Date.now() - start,

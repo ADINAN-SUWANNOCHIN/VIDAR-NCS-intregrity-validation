@@ -51,7 +51,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         // firewall/LB sees the connection as idle and sends TCP RST → ECONNRESET.
         // initialDelay=30s ensures probes start well before any reasonable firewall idle timeout.
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore — keepAlive is a valid tedious driver option but missing from @types/mssql 9.x
+        // @ts-ignore — keepAlive/keepAliveInitialDelayMs are valid node-mssql TCP options but not in IOptions typings
         keepAlive: true,
         keepAliveInitialDelayMs: 30000,
       },
