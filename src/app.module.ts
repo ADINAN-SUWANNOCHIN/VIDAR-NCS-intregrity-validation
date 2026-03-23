@@ -1,5 +1,5 @@
 import { Controller, Get, Module, Redirect } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { DatabaseService } from './database/database.service';
 import { PgCacheService } from './database/pg-cache.service';
 import { RuleLoaderService } from './rules/rule-loader.service';
@@ -16,7 +16,10 @@ import { SchemaService } from './schema/schema.service';
 /** Handles root-level routes that must NOT be prefixed by any controller path. */
 @Controller()
 class HealthController {
-  constructor(private readonly pg: PgCacheService) {}
+  constructor(
+    private readonly pg: PgCacheService,
+    private readonly config: ConfigService,
+  ) {}
 
   /** GET /health — Kubernetes liveness + readiness probe target. */
   @Get('health')
@@ -26,17 +29,24 @@ class HealthController {
 
   /** GET /health/pg — diagnostic: tests PostgreSQL cache DB connectivity and write ability. */
   @Get('health/pg')
-  async healthPg(): Promise<{ connected: boolean; writable: boolean; error?: string }> {
+  async healthPg(): Promise<object> {
+    const env = {
+      CACHE_DB_HOST: this.config.get('CACHE_DB_HOST') ?? '(not set)',
+      CACHE_DB_PORT: this.config.get('CACHE_DB_PORT') ?? '(not set)',
+      CACHE_DB_USER: this.config.get('CACHE_DB_USER') ?? '(not set)',
+      CACHE_DB_PASSWORD: this.config.get('CACHE_DB_PASSWORD') ? '(set)' : '(not set)',
+      CACHE_DB_NAME: this.config.get('CACHE_DB_NAME') ?? '(not set)',
+    };
     if (!this.pg.isAvailable) {
-      return { connected: false, writable: false, error: 'PgCacheService pool is null — check CACHE_DB_* env vars or startup logs' };
+      return { connected: false, writable: false, env, error: 'Pool is null — connection failed at startup (wrong creds, network unreachable, or env vars missing)' };
     }
     try {
       await this.pg.createCacheTable('_hc_test', ['v']);
       await this.pg.batchInsert('_hc_test', [{ v: 'ok' }], ['v']);
       await this.pg.dropCacheTable('_hc_test');
-      return { connected: true, writable: true };
+      return { connected: true, writable: true, env };
     } catch (e: any) {
-      return { connected: true, writable: false, error: e.message };
+      return { connected: true, writable: false, env, error: e.message };
     }
   }
 
