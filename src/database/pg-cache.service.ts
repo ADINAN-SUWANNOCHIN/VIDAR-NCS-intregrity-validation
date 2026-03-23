@@ -32,34 +32,43 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
       connectionTimeoutMillis: 10000,
     });
 
-    const client = await this.pool.connect();
-    client.release();
-    this.logger.log('Connected to PostgreSQL cache DB');
+    try {
+      const client = await this.pool.connect();
+      client.release();
+      this.logger.log('Connected to PostgreSQL cache DB');
 
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS jobs (
-        job_id   TEXT PRIMARY KEY,
-        record   JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS jobs (
+          job_id   TEXT PRIMARY KEY,
+          record   JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
 
-    // Drop any orphan cache tables left from a previous crashed run
-    const orphans = await this.pool.query(`
-      SELECT table_name FROM information_schema.tables
-      WHERE table_schema = 'public'
-        AND (table_name LIKE 'dv_src_%' OR table_name LIKE 'dv_ck_%')
-    `);
-    for (const row of orphans.rows) {
-      await this.pool.query(`DROP TABLE IF EXISTS "${row.table_name}"`);
-      this.logger.log(`[Cleanup] Dropped orphan cache table: ${row.table_name}`);
+      // Drop any orphan cache tables left from a previous crashed run
+      const orphans = await this.pool.query(`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND (table_name LIKE 'dv_src_%' OR table_name LIKE 'dv_ck_%')
+      `);
+      for (const row of orphans.rows) {
+        await this.pool.query(`DROP TABLE IF EXISTS "${row.table_name}"`);
+        this.logger.log(`[Cleanup] Dropped orphan cache table: ${row.table_name}`);
+      }
+
+      this.logger.log('PgCacheService ready');
+    } catch (e: any) {
+      this.logger.error(`PostgreSQL cache DB unavailable: ${e.message}`);
+      this.logger.warn('Job persistence and cache tables disabled — validation jobs requiring cache will fail at runtime');
+      await this.pool.end().catch(() => {});
+      this.pool = null as any;
     }
-
-    this.logger.log('PgCacheService ready');
   }
 
+  get isAvailable(): boolean { return this.pool != null; }
+
   async onModuleDestroy(): Promise<void> {
-    await this.pool.end();
+    if (this.pool) await this.pool.end();
   }
 
   // ----------------------------------------------------------------
@@ -67,6 +76,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
   // ----------------------------------------------------------------
 
   async upsertJob(record: JobRecord): Promise<void> {
+    if (!this.pool) return;
     try {
       await this.pool.query(
         `INSERT INTO jobs (job_id, record, updated_at) VALUES ($1, $2::jsonb, NOW())
@@ -79,11 +89,13 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getJob(jobId: string): Promise<JobRecord | null> {
+    if (!this.pool) return null;
     const res = await this.pool.query('SELECT record FROM jobs WHERE job_id = $1', [jobId]);
     return res.rows[0]?.record ?? null;
   }
 
   async listJobs(): Promise<JobRecord[]> {
+    if (!this.pool) return [];
     const res = await this.pool.query(
       `SELECT record FROM jobs ORDER BY (record->>'createdAt') DESC`,
     );
@@ -94,12 +106,18 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
   // Cache table management
   // ----------------------------------------------------------------
 
+  private assertAvailable(): void {
+    if (!this.pool) throw new Error('PostgreSQL cache DB is unavailable — check CACHE_DB_* env vars and network connectivity');
+  }
+
   async dropCacheTable(tableName: string): Promise<void> {
+    this.assertAvailable();
     await this.pool.query(`DROP TABLE IF EXISTS "${tableName}"`);
   }
 
   /** Create a cache table with all-TEXT columns (SQL Server types are irrelevant here). */
   async createCacheTable(tableName: string, columnNames: string[]): Promise<void> {
+    this.assertAvailable();
     const cols = columnNames.map((c) => `"${c}" TEXT`).join(', ');
     await this.pool.query(`CREATE TABLE IF NOT EXISTS "${tableName}" (${cols})`);
   }
@@ -110,6 +128,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     rows: Record<string, unknown>[],
     columnNames: string[],
   ): Promise<void> {
+    this.assertAvailable();
     if (rows.length === 0) return;
 
     const BATCH = 500;
@@ -137,6 +156,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createIndex(tableName: string, cols: string[]): Promise<void> {
+    this.assertAvailable();
     const colList = cols.map((c) => `"${c}"`).join(', ');
     await this.pool.query(`CREATE INDEX ON "${tableName}" (${colList})`);
   }
@@ -152,6 +172,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     chunkSize: number,
     lastKey: unknown,
   ): Promise<Record<string, unknown>[]> {
+    this.assertAvailable();
     const res =
       lastKey == null
         ? await this.pool.query(
@@ -171,6 +192,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     keyCol: string,
     keys: string[],
   ): Promise<Record<string, unknown>[]> {
+    this.assertAvailable();
     if (keys.length === 0) return [];
     const res = await this.pool.query(
       `SELECT * FROM "${tableName}" WHERE "${keyCol}" = ANY($1::text[])`,
