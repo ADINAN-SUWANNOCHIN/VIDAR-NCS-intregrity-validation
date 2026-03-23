@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as sql from 'mssql';
+import { PgCacheService } from './pg-cache.service';
 
 /** Returns a safe FROM-clause reference: leaves full cross-db refs intact, wraps simple names in [] */
 export function tableRef(t: string): string {
@@ -21,7 +22,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private static cacheSeq = 0;
   static nextCacheSeq(): number { return ++DatabaseService.cacheSeq; }
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly pg: PgCacheService,
+  ) {}
 
   async onModuleInit() {
     const missing = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].filter(
@@ -414,16 +418,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Copies a full table into a global temp table and creates a clustered index.
-   * Used by composite-key validation to avoid repeated full table scans on
-   * unindexed target tables (e.g. lv$lvhisthsum with no index on systemreferenceno).
+   * Copies a full SQL Server table into a PostgreSQL cache table with an index.
+   * Used by composite-key validation (validateCompositeKey) to avoid repeated
+   * full table scans — replaces the old SQL Server ##temp table approach.
    *
-   * The temp table is global (##name) so it is visible across all pool connections.
-   * Name includes process PID + timestamp to guarantee uniqueness per run.
-   *
-   * Safety: drops any existing table with the same name before creating (crash recovery).
-   * Permissions: only requires SELECT on sourceTable — temp tables are always created
-   * in tempdb where all logins have implicit CREATE TABLE rights.
+   * Streams rows from SQL Server with pause/resume backpressure and inserts
+   * them into PostgreSQL in batches. Index is created after all rows are inserted.
    */
   async createTargetCache(
     sourceTable: string,
@@ -431,62 +431,30 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     primaryIndexCol: string,
     secondaryIndexCol: string,
   ): Promise<void> {
-    // Safety drop in case previous run crashed without cleanup
-    await this.pool.request().query(
-      `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
-    );
-    this.logger.log(`[TempCache] Copying ${sourceTable} → [${tempName}] (full scan, once)...`);
-    // Override requestTimeout to unlimited for this query — large tables (15M+ rows) can
-    // take 5–30 min server-side for the SELECT INTO + clustered index build.
-    // The pool default (30 min) may not be enough; 0 = no limit.
-    const insertReq = this.pool.request();
-    (insertReq as any).timeout = 0; // unlimited — large-table SELECT INTO can exceed 30 min default
-    await insertReq.query(
-      `SELECT * INTO [${tempName}] FROM ${tableRef(sourceTable)} WITH (NOLOCK)`,
-    );
-    this.logger.log(`[TempCache] Building index on ([${primaryIndexCol}], [${secondaryIndexCol}])...`);
-    const idxReq = this.pool.request();
-    (idxReq as any).timeout = 0;
-    await idxReq.query(
-      `CREATE CLUSTERED INDEX [ix_dv_ck] ON [${tempName}] ([${primaryIndexCol}], [${secondaryIndexCol}])`,
-    );
-    this.logger.log(`[TempCache] Ready: [${tempName}]`);
+    const filterClause = '';
+    await this.copyToPostgres(sourceTable, tempName, filterClause, [primaryIndexCol, secondaryIndexCol], 'TgtCache');
   }
 
-  /**
-   * Drops the global temp table created by createTargetCache.
-   * Called in a finally block so it always runs even if validation throws.
-   */
+  /** Drops the PostgreSQL cache table created by createTargetCache. */
   async dropTargetCache(tempName: string): Promise<void> {
     try {
-      await this.pool.request().query(
-        `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
-      );
-      this.logger.log(`[TempCache] Dropped [${tempName}]`);
+      await this.pg.dropCacheTable(tempName);
+      this.logger.log(`[TgtCache] Dropped PG:${tempName}`);
     } catch (e: any) {
-      this.logger.warn(`[TempCache] Failed to drop [${tempName}]: ${e.message}`);
+      this.logger.warn(`[TgtCache] Failed to drop PG:${tempName}: ${e.message}`);
     }
   }
 
   /**
-   * Copies a source (old) table into a global temp table with a clustered index on
+   * Copies a source (old) table into a PostgreSQL cache table with an index on
    * (sysrefCol, idCol). Used by sysref-sort validation to eliminate scatter without
    * repeatedly sorting the full table per paginated chunk.
    *
-   * Why this solves ECONNRESET:
-   *   The problem: ORDER BY sysref on an unindexed 15M-row old table forces SQL Server to
-   *   full-scan + sort ALL rows for every FETCH NEXT chunk. 3000 chunks × one full sort each
-   *   = hours. SQL Server kills the idle-appearing connection mid-sort → ECONNRESET.
-   *
-   *   This fix: one single INSERT INTO SELECT copies the entire table to tempdb in one
-   *   server-side operation (no client data transfer per page). After that, fetchChunk on
-   *   the temp table uses the clustered sysref index → O(1) seek per chunk, milliseconds each.
-   *   Total: ~5-20 min one-time INSERT + seconds per chunk vs hours per chunk.
+   * Replaces the SQL Server ##temp table approach (which required tempdb write permission).
+   * Data flows: SQL Server (stream) → Node.js (buffer) → PostgreSQL (batch insert).
    *
    * An optional filter (source_filter from common.yaml) limits which rows are copied so
    * excluded rows (BF, CAL_INT, B_DIFF) are never in the cache.
-   *
-   * Permissions: only requires SELECT on sourceTable — tempdb is always writable by all logins.
    */
   async createSourceCache(
     sourceTable: string,
@@ -496,46 +464,127 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     filter?: string,
   ): Promise<void> {
     const filterClause = filter ? `WHERE (${filter})` : '';
-    await this.pool.request().query(
-      `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
-    );
-    this.logger.log(`[SrcCache] Copying ${sourceTable} → [${tempName}] (full scan, once)...`);
-    // Override requestTimeout to unlimited — 15M-row INSERT + index build can take 5–30 min.
-    const insertReq = this.pool.request();
-    (insertReq as any).timeout = 0; // unlimited — large-table SELECT INTO can exceed 30 min default
-    await insertReq.query(
-      `SELECT * INTO [${tempName}] FROM ${tableRef(sourceTable)} WITH (NOLOCK) ${filterClause}`,
-    );
-    // nvarchar(MAX) columns cannot be used as index keys in SQL Server.
-    // Alter the sysref column to nvarchar(450) (max indexable width) before creating the index.
-    // This is safe: systemreferenceno values are never close to 450 chars.
-    this.logger.log(`[SrcCache] Normalizing [${sysrefCol}] to NVARCHAR(450) for index compatibility...`);
-    const alterReq = this.pool.request();
-    (alterReq as any).timeout = 0;
-    await alterReq.query(
-      `ALTER TABLE [${tempName}] ALTER COLUMN [${sysrefCol}] NVARCHAR(450)`,
-    );
-    this.logger.log(`[SrcCache] Building clustered index on ([${sysrefCol}], [${idCol}])...`);
-    const idxReq = this.pool.request();
-    (idxReq as any).timeout = 0;
-    await idxReq.query(
-      `CREATE CLUSTERED INDEX [ix_dv_src] ON [${tempName}] ([${sysrefCol}], [${idCol}])`,
-    );
-    this.logger.log(`[SrcCache] Ready: [${tempName}]`);
+    await this.copyToPostgres(sourceTable, tempName, filterClause, [sysrefCol, idCol], 'SrcCache');
+  }
+
+  /** Drops the PostgreSQL cache table created by createSourceCache. */
+  async dropSourceCache(tempName: string): Promise<void> {
+    try {
+      await this.pg.dropCacheTable(tempName);
+      this.logger.log(`[SrcCache] Dropped PG:${tempName}`);
+    } catch (e: any) {
+      this.logger.warn(`[SrcCache] Failed to drop PG:${tempName}: ${e.message}`);
+    }
   }
 
   /**
-   * Drops the global temp table created by createSourceCache.
-   * Called in a finally block so it always runs even if validation throws.
+   * Keyset-paginated fetch from a PostgreSQL cache table.
+   * Drop-in replacement for fetchChunk() when the table is a PG cache (dv_src_* / dv_ck_*).
    */
-  async dropSourceCache(tempName: string): Promise<void> {
-    try {
-      await this.pool.request().query(
-        `IF OBJECT_ID('tempdb..[${tempName}]') IS NOT NULL DROP TABLE [${tempName}]`,
-      );
-      this.logger.log(`[SrcCache] Dropped [${tempName}]`);
-    } catch (e: any) {
-      this.logger.warn(`[SrcCache] Failed to drop [${tempName}]: ${e.message}`);
-    }
+  async fetchChunkCache(
+    tableName: string,
+    keyCol: string,
+    chunkSize: number,
+    lastKey: unknown,
+  ): Promise<Record<string, unknown>[]> {
+    return this.pg.fetchChunk(tableName, keyCol, chunkSize, lastKey);
+  }
+
+  /**
+   * Fetch rows by key list from a PostgreSQL cache table.
+   * Drop-in replacement for streamRowsByKeys() when the table is a PG cache.
+   */
+  async streamRowsByKeysCache(
+    tableName: string,
+    keyCol: string,
+    keys: string[],
+    callback: (row: Record<string, unknown>) => void,
+  ): Promise<void> {
+    if (keys.length === 0) return;
+    const rows = await this.pg.fetchByKeys(tableName, keyCol, keys);
+    for (const row of rows) callback(row);
+  }
+
+  /**
+   * Internal helper: stream all rows from a SQL Server table and insert into a PG cache table.
+   * Uses mssql streaming with pause/resume for backpressure — no unbounded memory accumulation.
+   */
+  private async copyToPostgres(
+    sourceTable: string,
+    tempName: string,
+    filterClause: string,
+    indexCols: string[],
+    logPrefix: string,
+  ): Promise<void> {
+    await this.pg.dropCacheTable(tempName);
+    this.logger.log(`[${logPrefix}] Copying ${sourceTable} → PG:${tempName}...`);
+
+    let columnNames: string[] = [];
+    let tableCreated = false;
+    let buffer: Record<string, unknown>[] = [];
+    let totalRows = 0;
+    let pendingRows = 0;
+    let streamDone = false;
+    const FLUSH_SIZE = 1000;
+
+    const request = this.pool.request();
+    request.stream = true;
+    (request as any).timeout = 0;
+    request.query(`SELECT * FROM ${tableRef(sourceTable)} WITH (NOLOCK) ${filterClause}`);
+
+    await new Promise<void>((resolve, reject) => {
+      const tryResolve = () => {
+        if (streamDone && pendingRows === 0) resolve();
+      };
+
+      request.on('row', (row: Record<string, unknown>) => {
+        request.pause();
+        pendingRows++;
+
+        (async () => {
+          try {
+            if (!tableCreated) {
+              columnNames = Object.keys(row);
+              await this.pg.createCacheTable(tempName, columnNames);
+              tableCreated = true;
+            }
+            buffer.push(row);
+            if (buffer.length >= FLUSH_SIZE) {
+              const batch = buffer.splice(0);
+              await this.pg.batchInsert(tempName, batch, columnNames);
+              totalRows += batch.length;
+            }
+            pendingRows--;
+            tryResolve();
+            request.resume();
+          } catch (e) {
+            reject(e);
+          }
+        })();
+      });
+
+      request.on('error', reject);
+
+      request.on('done', () => {
+        streamDone = true;
+        // Flush remaining buffer then resolve (if all row handlers are already done)
+        (async () => {
+          try {
+            if (buffer.length > 0) {
+              await this.pg.batchInsert(tempName, buffer, columnNames);
+              totalRows += buffer.length;
+              buffer = [];
+            }
+            tryResolve();
+          } catch (e) {
+            reject(e);
+          }
+        })();
+      });
+    });
+
+    this.logger.log(`[${logPrefix}] Inserted ${totalRows} rows → PG:${tempName}, building index...`);
+    await this.pg.createIndex(tempName, indexCols);
+    this.logger.log(`[${logPrefix}] Ready: PG:${tempName}`);
   }
 }

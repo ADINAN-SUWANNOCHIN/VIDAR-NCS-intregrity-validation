@@ -86,8 +86,11 @@ export class ValidationService {
         continue;
       }
 
-      // ---- โหลด def rules ----
-      const defRules = this.ruleLoader.loadDefRules(tableName, tableConfig.def_list, rulePath);
+      // ---- โหลด def rules + vali rules ----
+      const defRules = [
+        ...this.ruleLoader.loadValiRules(tableName, rulePath),
+        ...this.ruleLoader.loadDefRules(tableName, tableConfig.def_list, rulePath),
+      ];
 
       // ---- เลือก Strategy ----
       let errors: ValidationError[] = [];

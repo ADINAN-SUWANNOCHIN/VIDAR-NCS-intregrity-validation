@@ -1,32 +1,26 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import * as fs from 'fs';
-import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { PgCacheService } from '../database/pg-cache.service';
 import { JobRecord, JobStatus, TableSummary } from './job.types';
 
 /**
- * Job registry backed by an in-memory Map + a JSON file on disk.
+ * Job registry backed by an in-memory Map + PostgreSQL persistence.
  *
- * The JSON file is written on every state change and read back on startup.
- * This survives process restarts within the same pod (e.g. NestJS hot-reload,
- * manual restart) and makes past jobs queryable after restart.
+ * In-memory Map provides fast reads (no DB round-trip for status polling).
+ * PostgreSQL provides durability — jobs survive container restarts.
  *
- * Does NOT survive pod replacement (no PVC) — get a PVC for full persistence.
+ * Write path: update in-memory Map immediately, then fire-and-forget upsert to PG.
+ * Read path: always reads from in-memory Map (populated from PG on startup).
  */
 @Injectable()
 export class JobService implements OnModuleInit {
   private readonly logger = new Logger(JobService.name);
   private readonly jobs = new Map<string, JobRecord>();
-  private readonly persistPath: string;
 
-  constructor(private readonly config: ConfigService) {
-    const reportsDir = this.config.get<string>('REPORTS_DIR') ?? './reports';
-    this.persistPath = path.join(reportsDir, 'jobs.json');
-  }
+  constructor(private readonly pg: PgCacheService) {}
 
-  onModuleInit(): void {
-    this.loadFromDisk();
+  async onModuleInit(): Promise<void> {
+    await this.loadFromDb();
   }
 
   createJob(totalTables: number, label?: string): string {
@@ -39,7 +33,7 @@ export class JobService implements OnModuleInit {
       totalTables,
       doneTables: 0,
     });
-    this.persist();
+    this.persist(jobId);
     return jobId;
   }
 
@@ -47,13 +41,13 @@ export class JobService implements OnModuleInit {
     const job = this.getOrThrow(jobId);
     job.status = JobStatus.RUNNING;
     job.startedAt = new Date();
-    this.persist();
+    this.persist(jobId);
   }
 
   incrementDone(jobId: string): void {
     const job = this.getOrThrow(jobId);
     job.doneTables += 1;
-    this.persist();
+    this.persist(jobId);
   }
 
   complete(jobId: string, reportPaths: string[], summary: TableSummary[]): void {
@@ -62,7 +56,7 @@ export class JobService implements OnModuleInit {
     job.finishedAt = new Date();
     job.reportPaths = reportPaths;
     job.summary = summary;
-    this.persist();
+    this.persist(jobId);
   }
 
   fail(jobId: string, errorMessage: string): void {
@@ -70,7 +64,7 @@ export class JobService implements OnModuleInit {
     job.status = JobStatus.FAILED;
     job.finishedAt = new Date();
     job.errorMessage = errorMessage;
-    this.persist();
+    this.persist(jobId);
   }
 
   getStatus(jobId: string): JobRecord | undefined {
@@ -87,38 +81,36 @@ export class JobService implements OnModuleInit {
   // Persistence helpers
   // ----------------------------------------------------------------
 
-  private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
-      const records = [...this.jobs.values()];
-      fs.writeFileSync(this.persistPath, JSON.stringify(records, null, 2), 'utf-8');
-    } catch (e: any) {
-      this.logger.warn(`Failed to persist jobs to disk: ${e.message}`);
-    }
+  private persist(jobId: string): void {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    // Fire-and-forget — in-memory Map is the source of truth for reads
+    this.pg.upsertJob(job).catch((e) =>
+      this.logger.warn(`[Jobs] PG persist failed for ${jobId}: ${e.message}`),
+    );
   }
 
-  private loadFromDisk(): void {
+  private async loadFromDb(): Promise<void> {
     try {
-      if (!fs.existsSync(this.persistPath)) return;
-      const raw = fs.readFileSync(this.persistPath, 'utf-8');
-      const records: JobRecord[] = JSON.parse(raw);
+      const records = await this.pg.listJobs();
       let recovered = 0;
       for (const r of records) {
         // Revive date strings back to Date objects
         r.createdAt = new Date(r.createdAt);
         if (r.startedAt) r.startedAt = new Date(r.startedAt);
         if (r.finishedAt) r.finishedAt = new Date(r.finishedAt);
-        // Any job that was RUNNING when the process died is now effectively failed
+        // Any job that was RUNNING when the pod died is now effectively failed
         if (r.status === JobStatus.RUNNING) {
           r.status = JobStatus.FAILED;
-          r.errorMessage = 'Process restarted while job was running — results may be incomplete';
+          r.errorMessage = 'Pod restarted while job was running — results may be incomplete';
+          this.pg.upsertJob(r).catch(() => {});
         }
         this.jobs.set(r.jobId, r);
         recovered++;
       }
-      this.logger.log(`Recovered ${recovered} job(s) from disk`);
+      this.logger.log(`Recovered ${recovered} job(s) from PostgreSQL`);
     } catch (e: any) {
-      this.logger.warn(`Failed to load jobs from disk: ${e.message}`);
+      this.logger.warn(`Failed to load jobs from PostgreSQL: ${e.message}`);
     }
   }
 

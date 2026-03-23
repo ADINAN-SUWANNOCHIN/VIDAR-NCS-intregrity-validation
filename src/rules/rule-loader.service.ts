@@ -79,6 +79,41 @@ export class RuleLoaderService {
   }
 
   // ----------------------------------------------------------------
+  // Vali Rules (technical checks — layer between common and def)
+  // Loads from {tableDir}/vali/ (table-specific) and rules/vali/ (global fallback).
+  // Table-specific vali_id takes priority over global, same as def rules.
+  // ----------------------------------------------------------------
+  loadValiRules(tableName: string, rulePath?: string): DefRule[] {
+    const cacheKey = `vali::${rulePath ?? '__legacy__'}::${tableName}`;
+    if (this.defRuleCache.has(cacheKey)) {
+      return this.defRuleCache.get(cacheKey)!;
+    }
+
+    const rules: DefRule[] = [];
+
+    // 1. Table-specific vali files
+    const valiDir = path.join(this.resolveTableDir(tableName, rulePath), 'vali');
+    if (fs.existsSync(valiDir)) {
+      rules.push(...this.readDefYamls(valiDir, undefined, `table:${tableName}`));
+    }
+
+    // 2. Global vali files — table-specific takes priority
+    const globalValiDir = path.join(this.rulesDir, 'vali');
+    if (fs.existsSync(globalValiDir)) {
+      const loadedIds = new Set(rules.map((r) => r.def_id));
+      const globalRules = this.readDefYamls(globalValiDir, undefined, 'global-vali');
+      for (const rule of globalRules) {
+        if (!loadedIds.has(rule.def_id)) {
+          rules.push(rule);
+        }
+      }
+    }
+
+    this.defRuleCache.set(cacheKey, rules);
+    return rules;
+  }
+
+  // ----------------------------------------------------------------
   // Def Rules
   // ----------------------------------------------------------------
   loadDefRules(tableName: string, defIds?: string[], rulePath?: string): DefRule[] {

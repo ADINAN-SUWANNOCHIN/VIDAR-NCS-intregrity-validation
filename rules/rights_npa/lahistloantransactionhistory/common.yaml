@@ -28,9 +28,10 @@
 #   - noofdays: old=nvarchar (often empty) vs new=null int — excluded for now
 #   - interestrate: old="" empty vs new=0 decimal — excluded for now
 #
+# Vali rules:
+#   - vali001: Teller ID conversion check (FIELD_VALUE_CHECK) — global vali
 # Def rules:
 #   - def01:  PP+QQ group cohesion check (ROW_LEVEL_COHESION)
-#   - def001: Teller ID conversion check (FIELD_VALUE_CHECK) — global or table-specific
 # ============================================================
 
 table_info:
