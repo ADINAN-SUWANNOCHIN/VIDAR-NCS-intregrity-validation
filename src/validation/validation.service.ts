@@ -64,6 +64,7 @@ export class ValidationService {
           pass: 0,
           fail: 0,
           missing: 1,
+          skipped: 0,
           timeSpent: Date.now() - start,
           errors: [{ errorType: 'DATA_MISSING', message: `No rule directory found for table ${tableName}` }],
         });
@@ -80,9 +81,10 @@ export class ValidationService {
           pass: 0,
           fail: 0,
           missing: 1,
+          skipped: 0,
           timeSpent: Date.now() - start,
           rowsChecked: 0,
-        errors: [{ errorType: 'DATA_MISSING', message: `common.yaml not found or parse error for ${tableName}` }],
+          errors: [{ errorType: 'DATA_MISSING', message: `common.yaml not found or parse error for ${tableName}` }],
         });
         this.jobService.incrementDone(jobId);
         continue;
@@ -122,6 +124,7 @@ export class ValidationService {
         pass: errors.length === 0 ? 1 : 0,
         fail: valueErrors.length,
         missing: missingErrors.length,
+        skipped: 0,
         timeSpent: Date.now() - start,
         errors,
       });

@@ -50,6 +50,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         // 15M-row source cache) where no data flows back to Node.js. Without this, the network
         // firewall/LB sees the connection as idle and sends TCP RST → ECONNRESET.
         // initialDelay=30s ensures probes start well before any reasonable firewall idle timeout.
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore — keepAlive/keepAliveInitialDelayMs are valid node-mssql TCP options but not in IOptions typings
         keepAlive: true,
         keepAliveInitialDelayMs: 30000,
       },

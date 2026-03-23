@@ -16,6 +16,7 @@ import { JobRecord, JobStatus } from '../job/job.types';
 @Injectable()
 export class PgCacheService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PgCacheService.name);
+  private readonly schema = 'cache';
   private pool: Pool;
 
   constructor(private readonly config: ConfigService) {}
@@ -38,7 +39,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Connected to PostgreSQL cache DB');
 
       await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS jobs (
+        CREATE TABLE IF NOT EXISTS ${this.schema}.jobs (
           job_id   TEXT PRIMARY KEY,
           record   JSONB NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -48,11 +49,11 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
       // Drop any orphan cache tables left from a previous crashed run
       const orphans = await this.pool.query(`
         SELECT table_name FROM information_schema.tables
-        WHERE table_schema = 'public'
+        WHERE table_schema = '${this.schema}'
           AND (table_name LIKE 'dv_src_%' OR table_name LIKE 'dv_ck_%')
       `);
       for (const row of orphans.rows) {
-        await this.pool.query(`DROP TABLE IF EXISTS "${row.table_name}"`);
+        await this.pool.query(`DROP TABLE IF EXISTS ${this.schema}."${row.table_name}"`);
         this.logger.log(`[Cleanup] Dropped orphan cache table: ${row.table_name}`);
       }
 
@@ -79,7 +80,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     if (!this.pool) return;
     try {
       await this.pool.query(
-        `INSERT INTO jobs (job_id, record, updated_at) VALUES ($1, $2::jsonb, NOW())
+        `INSERT INTO ${this.schema}.jobs (job_id, record, updated_at) VALUES ($1, $2::jsonb, NOW())
          ON CONFLICT (job_id) DO UPDATE SET record = $2::jsonb, updated_at = NOW()`,
         [record.jobId, JSON.stringify(record)],
       );
@@ -90,14 +91,14 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
 
   async getJob(jobId: string): Promise<JobRecord | null> {
     if (!this.pool) return null;
-    const res = await this.pool.query('SELECT record FROM jobs WHERE job_id = $1', [jobId]);
+    const res = await this.pool.query(`SELECT record FROM ${this.schema}.jobs WHERE job_id = $1`, [jobId]);
     return res.rows[0]?.record ?? null;
   }
 
   async listJobs(): Promise<JobRecord[]> {
     if (!this.pool) return [];
     const res = await this.pool.query(
-      `SELECT record FROM jobs ORDER BY (record->>'createdAt') DESC`,
+      `SELECT record FROM ${this.schema}.jobs ORDER BY (record->>'createdAt') DESC`,
     );
     return res.rows.map((r) => r.record as JobRecord);
   }
@@ -112,14 +113,14 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
 
   async dropCacheTable(tableName: string): Promise<void> {
     this.assertAvailable();
-    await this.pool.query(`DROP TABLE IF EXISTS "${tableName}"`);
+    await this.pool.query(`DROP TABLE IF EXISTS ${this.schema}."${tableName}"`);
   }
 
   /** Create a cache table with all-TEXT columns (SQL Server types are irrelevant here). */
   async createCacheTable(tableName: string, columnNames: string[]): Promise<void> {
     this.assertAvailable();
     const cols = columnNames.map((c) => `"${c}" TEXT`).join(', ');
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS "${tableName}" (${cols})`);
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.schema}."${tableName}" (${cols})`);
   }
 
   /** Batch-insert rows into a cache table. All values are coerced to TEXT. */
@@ -149,7 +150,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
 
       const cols = columnNames.map((c) => `"${c}"`).join(', ');
       await this.pool.query(
-        `INSERT INTO "${tableName}" (${cols}) VALUES ${valueRows.join(', ')}`,
+        `INSERT INTO ${this.schema}."${tableName}" (${cols}) VALUES ${valueRows.join(', ')}`,
         params,
       );
     }
@@ -158,7 +159,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
   async createIndex(tableName: string, cols: string[]): Promise<void> {
     this.assertAvailable();
     const colList = cols.map((c) => `"${c}"`).join(', ');
-    await this.pool.query(`CREATE INDEX ON "${tableName}" (${colList})`);
+    await this.pool.query(`CREATE INDEX ON ${this.schema}."${tableName}" (${colList})`);
   }
 
   /**
@@ -176,11 +177,11 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     const res =
       lastKey == null
         ? await this.pool.query(
-            `SELECT * FROM "${tableName}" ORDER BY "${keyCol}" LIMIT $1`,
+            `SELECT * FROM ${this.schema}."${tableName}" ORDER BY "${keyCol}" LIMIT $1`,
             [chunkSize],
           )
         : await this.pool.query(
-            `SELECT * FROM "${tableName}" WHERE "${keyCol}" > $1 ORDER BY "${keyCol}" LIMIT $2`,
+            `SELECT * FROM ${this.schema}."${tableName}" WHERE "${keyCol}" > $1 ORDER BY "${keyCol}" LIMIT $2`,
             [String(lastKey), chunkSize],
           );
     return res.rows as Record<string, unknown>[];
@@ -195,7 +196,7 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     this.assertAvailable();
     if (keys.length === 0) return [];
     const res = await this.pool.query(
-      `SELECT * FROM "${tableName}" WHERE "${keyCol}" = ANY($1::text[])`,
+      `SELECT * FROM ${this.schema}."${tableName}" WHERE "${keyCol}" = ANY($1::text[])`,
       [keys],
     );
     return res.rows as Record<string, unknown>[];
