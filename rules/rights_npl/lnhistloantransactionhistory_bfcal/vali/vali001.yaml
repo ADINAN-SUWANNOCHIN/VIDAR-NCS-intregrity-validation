@@ -1,5 +1,6 @@
-# ============================================================
-# def001 — BF/CAL_INT/B_DIFF Row Count Check
+# VALI 001 — BF/CAL_INT/B_DIFF Row Count Check
+#
+# Layer: validate (technical count check — not business logic)
 # Scope: rights_npl / lnhistloantransactionhistory_bfcal
 #
 # Validates that the total number of rows for each system batch sysref
@@ -10,9 +11,8 @@
 # aggregation semantically meaningless.
 #
 # Pass condition: COUNT(old rows for this sysref) == COUNT(new rows for this sysref)
-# ============================================================
 
-def_id: def001
+def_id: vali001
 target_scope: transaction_group
 
 actions:

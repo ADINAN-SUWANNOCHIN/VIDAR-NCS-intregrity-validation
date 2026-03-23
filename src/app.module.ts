@@ -1,6 +1,7 @@
 import { Controller, Get, Module, Redirect } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { DatabaseService } from './database/database.service';
+import { PgCacheService } from './database/pg-cache.service';
 import { RuleLoaderService } from './rules/rule-loader.service';
 import { JobService } from './job/job.service';
 import { ReportService } from './reports/report.service';
@@ -36,6 +37,7 @@ class HealthController {
   ],
   controllers: [HealthController, ValidationController, SchemaController],
   providers: [
+    PgCacheService,
     DatabaseService,
     RuleLoaderService,
     JobService,

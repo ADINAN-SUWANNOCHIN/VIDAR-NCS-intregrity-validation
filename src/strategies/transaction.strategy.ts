@@ -339,7 +339,7 @@ export class TransactionStrategy extends BaseStrategy {
     // This replaces repeated full-table IN-clause scans (16K+ for RQ sysrefs)
     // with a single upfront scan + indexed seeks for all subsequent lookups.
     // Requires only SELECT on target — temp tables are created in tempdb (always writable).
-    const tempName = `##dv_ck_${process.pid}_${DatabaseService.nextCacheSeq()}`;
+    const tempName = `dv_ck_${process.pid}_${DatabaseService.nextCacheSeq()}`;
     await this.db.createTargetCache(target, tempName, targetFetchKey, ck.new_col);
 
     // Paginate through distinct sysrefs using source_filter
@@ -382,7 +382,7 @@ export class TransactionStrategy extends BaseStrategy {
 
         // d. Fetch all new rows from the TEMP CACHE (indexed — fast seek instead of full scan)
         const newRows: Record<string, unknown>[] = [];
-        await this.db.streamRowsByKeys(tempName, targetFetchKey, sysrefs, (row) => newRows.push(row));
+        await this.db.streamRowsByKeysCache(tempName, targetFetchKey, sysrefs, (row) => newRows.push(row));
 
         // e. Group new rows by composite key (sysref::lvaccountno)
         const newGroupMap = new Map<string, Record<string, unknown>[]>();
@@ -673,7 +673,7 @@ export class TransactionStrategy extends BaseStrategy {
     // chunk (ORDER BY sysref on unindexed column = hours), we pay one upfront INSERT (~5-20 min)
     // then every fetchChunk becomes a fast index seek (milliseconds).
     // sourceFilter is baked into the cache so no filter needed in subsequent fetchChunk calls.
-    const tempName = `##dv_src_${process.pid}_${DatabaseService.nextCacheSeq()}`;
+    const tempName = `dv_src_${process.pid}_${DatabaseService.nextCacheSeq()}`;
     await this.db.createSourceCache(source, tempName, oldKeyCol, anchorKeyOld, sourceFilter);
 
     // ---- Sysref-sorted carry-over loop ----
@@ -685,7 +685,7 @@ export class TransactionStrategy extends BaseStrategy {
 
     try {
     while (true) {
-      const oldChunk = await this.db.fetchChunk(tempName, oldKeyCol, chunkSize, lastSysref);
+      const oldChunk = await this.db.fetchChunkCache(tempName, oldKeyCol, chunkSize, lastSysref);
       if (oldChunk.length === 0) break;
 
       const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);

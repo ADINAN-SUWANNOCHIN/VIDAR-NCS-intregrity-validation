@@ -1,0 +1,29 @@
+# Global VALI 001 — Teller ID Conversion Check
+#
+# Layer: validate (technical check — not business logic)
+#
+# Purpose: Verify that teller IDs were properly converted from numeric codes
+#   to AD usernames during migration.
+#
+#   - Old rows where tellerid = 'CONV' are conversion records — allowed to
+#     produce new rows that also have CONV-style tellerids.
+#   - All other old rows must produce new rows with a real AD username.
+#
+# This vali is global and applies to any TRANSACTION or MULTIPLE (group-mode)
+# table that has a tellerid column. Table-specific vali files with the same
+# vali_id (vali001) override this global one.
+#
+# Fail patterns: purely numeric (e.g. "2398"), starts with "*", equals "CONV" or "PLAN"
+
+def_id: vali001
+target_scope: transaction_group
+actions:
+  - step: "1"
+    check_type: FIELD_VALUE_CHECK
+    variables:
+      new_col: tellerid
+      old_col: tellerid
+      skip_if_old_equals: CONV
+      fail_if_new_matches: "^\\d+$|^\\*|^CONV$|^PLAN"
+    condition: valid
+    error_message: "Teller ID not converted — expected AD username (e.g. surasak.s), got unconverted code"

@@ -1,0 +1,52 @@
+# ============================================================
+# def001 — H-table Principle/Unearned Integrity Check
+# Scope: rights_npa / lahistloantransactionhistory_crosscheck
+#
+# Context:
+#   old = la$lahisthloantransactionhistoryh  (H-table, 2 rows per sysref)
+#   new = la$lahistloantransactionhistory    (detail table, N rows per sysref)
+#
+# What formula_matches already cover (common.yaml):
+#   credit* - debit* (H) == bill* (detail) — the main column-level validation.
+#
+# What this def adds:
+#   Internal H-table structural check: creditprincipleamount (PP/C) should always
+#   be >= debitunearnedprofitamount (PG/D), because the full principal payment
+#   must be >= the unearned profit portion embedded in it.
+#
+# Expected false positives (NOT migration bugs):
+#   Sysref prefixes UPDA, UPDP, PSA, NSEM — these are adjustment/update transaction
+#   types that have PG rows but no PP rows. They produce creditprincipleamount=0
+#   with debitunearnedprofitamount>0 by design.
+#   Confirmed: 937 violations from these prefixes out of 1010 total.
+#
+# Real signal:
+#   ITEM* prefix violations (73 observed in current data) — these indicate that
+#   a normal payment transaction had its PP/PG amounts incorrectly restructured
+#   in the H-table. Worth investigating individually.
+# ============================================================
+
+def_id: def001
+target_scope: transaction_group
+
+actions:
+  # -------------------------------------------------------
+  # Step 1: H principle/unearned direction check
+  # PP/C (full principal) must be >= PG/D (unearned profit portion).
+  # A violation on ITEM* sysrefs indicates H-table restructured
+  # the PP or PG amounts incorrectly during migration.
+  #
+  # Expected violations: UPDA/UPDP/PSA/NSEM sysrefs (~937 known, by design).
+  # Real bugs: ITEM* violations (~73 observed — investigate these).
+  # -------------------------------------------------------
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_credit_pp: "SUM(old.creditprincipleamount)"
+      val_debit_un:  "SUM(old.debitunearnedprofitamount)"
+    condition: "val_credit_pp >= val_debit_un"
+    error_message: >
+      H-table principle/unearned amount inconsistency.
+      SUM(creditprincipleamount)={val_credit_pp} < SUM(debitunearnedprofitamount)={val_debit_un}.
+      For ITEM* sysrefs: PP/C should always cover PG/D — this indicates a migration error.
+      For UPDA/UPDP/PSA sysrefs: expected (adjustment transactions have PG without PP).

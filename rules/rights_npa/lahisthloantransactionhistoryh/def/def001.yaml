@@ -120,3 +120,26 @@ actions:
       H table interest ledger is unbalanced for this group.
       SUM(creditinterestamount)={val_credit} != SUM(debitinterestamount)={val_debit}.
       Unbalanced double-entry indicates missing or duplicate H row.
+
+  # -------------------------------------------------------
+  # Step 6: PG/D → debitunearnedprofitamount
+  # PG (Unearned Profit) debit rows in CONV map directly to
+  # debitunearnedprofitamount in the H table.
+  # Confirmed across multiple sysrefs: PG/D amount == H.debitunearnedprofitamount.
+  # Not all sysrefs have PG rows — trigger guards against false failures.
+  #
+  # NOTE: QQ lthc=82100 dc="" — bookkeeping row in CONV showing the interest
+  # portion split from the QQ payment. Always equals I1 amount. Does NOT map
+  # to a separate H column — already captured via I1/C → creditinterestamount.
+  # -------------------------------------------------------
+  - step: "6"
+    check_type: ROW_LEVEL_COHESION
+    trigger_condition:
+      must_have_any: [PG]
+    variables:
+      val_pg_debit: "SUM(old.transactionamount[affectcode=PG][debitcredit=D])"
+      val_unearned: "SUM(new.debitunearnedprofitamount)"
+    condition: "val_pg_debit == val_unearned"
+    error_message: >
+      PG/D not correctly pivoted to debitunearnedprofitamount.
+      old.transactionamount[PG/D]={val_pg_debit}, new.debitunearnedprofitamount={val_unearned}.
