@@ -154,13 +154,20 @@ schema_mappings:
       new: endinterestdate
       transform_rule: DATE_TO_DATETIME
 
-  # --- lv* split validation ---
-  # SUM of all old transactionamount per group = SUM of all lv* columns in H per group.
-  # Each old row's amount is routed to exactly one lv* debit or credit column.
-  # NOTE: For ITEM (live) groups, all lv* = 0 but old txamt > 0 → VALUE_MISMATCH expected.
+  # --- amount split validation ---
+  # SUM(old transactionamount per group) = SUM of all receiving columns in H per group.
+  # Routing confirmed by Q4 SUM cross-check across whole table:
+  #   PP/C → lvcreditprincipleamount
+  #   PP/D → lvdebitprincipleamount
+  #   QQ/C + QQ/D → transactionamount  (debit/credit distinction lost; both combined into one column)
+  #   I1/C → lvcreditinterestamount
+  #   I1/D → lvdebitinterestamount
+  # NOTE: zero-amount sysrefs (PSA/ADJ/ADJM prefix, ~17k) are absent from H-table by design;
+  #   they migrated to ls$lshistinvtransactionhistory instead. SUM validation is unaffected.
   split_matches:
     - old: transactionamount
       new_cols:
+        - transactionamount          # QQ rows route here (debit+credit combined)
         - lvcreditprincipleamount
         - lvdebitprincipleamount
         - lvcreditgaincash
