@@ -15,6 +15,7 @@ import { IsArray, IsOptional, IsString } from 'class-validator';
 import * as express from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import archiver = require('archiver');
 import { ValidationService } from './validation.service';
 import { PresetService } from './preset.service';
 import { JobService } from '../job/job.service';
@@ -96,45 +97,68 @@ export class ValidationController {
   }
 
   /**
-   * GET /validation/download/:jobId?file=Summary_Report.csv
-   * Streams a report CSV file as a download attachment.
-   * The file param must match a filename in the job's reportPaths (prevents path traversal).
+   * GET /validation/download/:jobId
+   * Downloads all report files for a job as a ZIP archive.
+   * Optional ?file= param to download a single file by name instead.
    *
-   * Example:
-   *   GET /validation/download/abc123?file=Summary_Report.csv
-   *   GET /validation/download/abc123?file=Detail_Log_conv%24vinpahistory.csv
+   * Examples:
+   *   GET /validation/download/abc123                          → ZIP with all reports
+   *   GET /validation/download/abc123?file=Summary_Report.csv → single file
+   *   GET /validation/download/abc123?file=Detail_Log.csv     → single file
    */
   @Get('download/:jobId')
   async downloadReport(
     @Param('jobId') jobId: string,
-    @Query('file') file: string,
+    @Query('file') file: string | undefined,
     @Res() res: express.Response,
   ): Promise<void> {
-    if (!file) throw new BadRequestException('Query param "file" is required');
-
     const job = this.jobService.getStatus(jobId);
     if (!job) throw new NotFoundException(`Job ${jobId} not found`);
     if (job.status !== 'DONE') throw new BadRequestException(`Job is still ${job.status}`);
 
-    // Only serve files that are recorded in the job's reportPaths
-    const reportPath = (job.reportPaths ?? []).find(
-      (p) => path.basename(p) === path.basename(file),
-    );
-    if (!reportPath) {
-      throw new NotFoundException(
-        `File "${file}" not found in job reports. Available: ${(job.reportPaths ?? []).map((p) => path.basename(p)).join(', ')}`,
-      );
+    const reportPaths = job.reportPaths ?? [];
+    if (reportPaths.length === 0) {
+      throw new NotFoundException(`No report files found for job ${jobId}`);
     }
 
-    const absPath = path.resolve(reportPath);
-    if (!fs.existsSync(absPath)) {
-      throw new NotFoundException(`Report file not found on disk: ${reportPath}`);
+    // Single-file download when ?file= is specified
+    if (file) {
+      const reportPath = reportPaths.find((p) => path.basename(p) === path.basename(file));
+      if (!reportPath) {
+        throw new NotFoundException(
+          `File "${file}" not found. Available: ${reportPaths.map((p) => path.basename(p)).join(', ')}`,
+        );
+      }
+      const absPath = path.resolve(reportPath);
+      if (!fs.existsSync(absPath)) {
+        throw new NotFoundException(`Report file not found on disk: ${reportPath}`);
+      }
+      const filename = path.basename(absPath);
+      const contentType = filename.endsWith('.xlsx')
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'text/csv; charset=utf-8';
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      fs.createReadStream(absPath).pipe(res);
+      return;
     }
 
-    const filename = path.basename(absPath);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    fs.createReadStream(absPath).pipe(res);
+    // Default: stream all report files as a ZIP
+    const zipName = `validation_${jobId.slice(0, 8)}.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.pipe(res);
+
+    for (const p of reportPaths) {
+      const absPath = path.resolve(p);
+      if (fs.existsSync(absPath)) {
+        archive.file(absPath, { name: path.basename(absPath) });
+      }
+    }
+
+    await archive.finalize();
   }
 
   /**
