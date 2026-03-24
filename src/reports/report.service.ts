@@ -57,7 +57,7 @@ export class ReportService {
 
     // ---- Job meta block ----
     const generatedAt = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
-    const passCount   = results.filter(r => r.fail === 0 && r.missing === 0 && r.skipped === 0).length;
+    const passCount   = results.filter(r => r.fail === 0 && r.missing === 0 && r.skipped === 0 && r.total === 0).length;
     const failCount   = results.length - passCount;
 
     ws.write(csvRow(['Job ID',       jobId]));
@@ -85,7 +85,7 @@ export class ReportService {
 
     // ---- Data rows ----
     for (const r of results) {
-      const status = r.fail === 0 && r.missing === 0 && r.skipped === 0 ? 'PASS' : 'FAIL';
+      const status = r.fail === 0 && r.missing === 0 && r.skipped === 0 && r.total === 0 ? 'PASS' : 'FAIL';
       const remarks = r.errors
         .filter(e => ['COLUMN_MISSING', 'DATA_MISSING', 'TRANSFORM_ERROR'].includes(e.errorType))
         .map(e => e.message)
