@@ -148,7 +148,7 @@ export class ValidationService {
       fail: r.fail,
       skipped: r.skipped,
       totalErrors: r.total,
-      status: (r.fail === 0 && r.missing === 0 && r.skipped === 0 ? 'PASS' : 'FAIL') as 'PASS' | 'FAIL',
+      status: (r.fail === 0 && r.missing === 0 && r.skipped === 0 && r.total === 0 ? 'PASS' : 'FAIL') as 'PASS' | 'FAIL',
       timeSpentSec: parseFloat((r.timeSpent / 1000).toFixed(2)),
     }));
 
