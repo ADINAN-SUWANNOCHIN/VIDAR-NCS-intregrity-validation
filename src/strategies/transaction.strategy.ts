@@ -650,7 +650,7 @@ export class TransactionStrategy extends BaseStrategy {
    */
   private async validateSysrefSort(
     ctx: ValidationContext,
-  ): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
+  ): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number; totalErrors: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
     let passCount = 0;
@@ -693,6 +693,19 @@ export class TransactionStrategy extends BaseStrategy {
       sm = this.filterMappingsAfterSchemaCheck(sm, colErrors);
     }
     errors.push(...await this.reportUnmappedColumns(source, target, sm, 'TXN-SS'));
+
+    // ---- Error cap setup ----
+    // Bulk errors (VALUE_MISMATCH / ROW_MISSING) can number in the millions for large tables.
+    // Cap them to avoid OOM. Structural errors (schema checks above) are never capped.
+    const MAX_BULK = parseInt(process.env.MAX_ERRORS ?? '50000');
+    let bulkCount = 0;
+    const preLoopErrors = errors.length;
+    const pushBulk = (...items: ValidationError[]) => {
+      for (const e of items) {
+        bulkCount++;
+        if (bulkCount <= MAX_BULK) errors.push(e);
+      }
+    };
 
     // ---- Noisy column detection ----
     const allOldCols = [
@@ -763,17 +776,17 @@ export class TransactionStrategy extends BaseStrategy {
         if (groupKey === carryKey) continue;
         const newGroup = newGroupMap.get(groupKey) ?? [];
         if (newGroup.length === 0) {
-          errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
+          pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
           failCount += oldGroup.length;
           continue;
         }
         const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
-        errors.push(...groupErrors);
+        pushBulk(...groupErrors);
         if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
-          errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+          pushBulk(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
         }
         const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
-        errors.push(...defErrors);
+        pushBulk(...defErrors);
         if (groupErrors.length + defErrors.length === 0) {
           passCount += oldGroup.length;
         } else {
@@ -784,7 +797,7 @@ export class TransactionStrategy extends BaseStrategy {
       for (const [groupKey] of newGroupMap) {
         if (groupKey === carryKey) continue;
         if (!oldGroupMap.has(groupKey)) {
-          errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in target but not in source (extra row)` });
+          pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in target but not in source (extra row)` });
         }
       }
 
@@ -796,17 +809,17 @@ export class TransactionStrategy extends BaseStrategy {
     for (const [groupKey, oldGroup] of carryOld) {
       const newGroup = carryNew.get(groupKey) ?? [];
       if (newGroup.length === 0) {
-        errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
+        pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in source but not in target` });
         failCount += oldGroup.length;
         continue;
       }
       const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, sm, tolerance, noisyMap);
-      errors.push(...groupErrors);
+      pushBulk(...groupErrors);
       if (groupErrors.length > 0 && tg?.row_fingerprint?.length) {
-        errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+        pushBulk(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
       }
       const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, defRules, affectCodeMap, tolerance);
-      errors.push(...defErrors);
+      pushBulk(...defErrors);
       if (groupErrors.length + defErrors.length === 0) {
         passCount += oldGroup.length;
       } else {
@@ -815,15 +828,22 @@ export class TransactionStrategy extends BaseStrategy {
     }
     for (const [groupKey] of carryNew) {
       if (!carryOld.has(groupKey)) {
-        errors.push({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in target but not in source (extra row at chunk boundary)` });
+        pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `Transaction group [${groupKey}] found in target but not in source (extra row at chunk boundary)` });
       }
     }
     } finally {
       await this.db.dropSourceCache(tempName);
     }
 
-    this.logger.log(`[TXN-SS] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
-    return { errors, rowsChecked, passCount, failCount };
+    const totalErrors = preLoopErrors + bulkCount;
+    if (bulkCount > MAX_BULK) {
+      errors.push({
+        errorType: 'TRANSFORM_ERROR',
+        message: `[ERROR_CAP] Stored ${MAX_BULK.toLocaleString()} of ${bulkCount.toLocaleString()} bulk errors. Increase MAX_ERRORS env var (default: 50000) to see all.`,
+      });
+    }
+    this.logger.log(`[TXN-SS] Done: ${totalErrors} error(s) (stored ${errors.length}), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount}`);
+    return { errors, rowsChecked, passCount, failCount, totalErrors };
   }
 
   /**

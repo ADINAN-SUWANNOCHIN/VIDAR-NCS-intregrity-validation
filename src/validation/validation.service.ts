@@ -46,6 +46,11 @@ export class ValidationService {
     const globalCodes = this.ruleLoader.loadGlobalAffectCodes();
     const affectCodeMap = new Map(globalCodes.codes.map((c) => [c.code.toUpperCase(), c.description]));
 
+    // Open detail log once — errors are flushed per-table then cleared from memory
+    const { ws: detailWs, detailPath, jobDir } = this.reportService.openDetailLog(jobId);
+    let reportPaths: string[] = [];
+
+    try {
     for (const tableConfig of dto.tables) {
       const tableName = tableConfig.table_name;
       const start = Date.now();
@@ -57,17 +62,16 @@ export class ValidationService {
       // ---- ตรวจว่ามี rule directory ----
       if (!this.ruleLoader.hasRuleDirectory(tableName, rulePath)) {
         this.logger.warn(`[Job:${jobId}] No rule directory for ${tableName}, skipping`);
-        results.push({
+        const r: TableResult = {
           tableName,
-          rowsChecked: 0,
-          pass: 0,
-          fail: 0,
-          skipped: 0,
-          total: 0,
-          missing: 1,
+          rowsChecked: 0, pass: 0, fail: 0, skipped: 0, total: 0, missing: 1,
           timeSpent: Date.now() - start,
           errors: [{ errorType: 'DATA_MISSING', message: `No rule directory found for table ${tableName}` }],
-        });
+          remarks: `No rule directory found for table ${tableName}`,
+        };
+        this.reportService.appendTableDetail(detailWs, r);
+        r.errors = [];
+        results.push(r);
         this.jobService.incrementDone(jobId);
         continue;
       }
@@ -75,17 +79,16 @@ export class ValidationService {
       // ---- โหลด common rule ----
       const commonRule = this.ruleLoader.loadCommonRule(tableName, rulePath);
       if (!commonRule) {
-        results.push({
+        const r: TableResult = {
           tableName,
-          rowsChecked: 0,
-          pass: 0,
-          fail: 0,
-          skipped: 0,
-          total: 0,
-          missing: 1,
+          rowsChecked: 0, pass: 0, fail: 0, skipped: 0, total: 0, missing: 1,
           timeSpent: Date.now() - start,
           errors: [{ errorType: 'DATA_MISSING', message: `common.yaml not found or parse error for ${tableName}` }],
-        });
+          remarks: `common.yaml not found or parse error for ${tableName}`,
+        };
+        this.reportService.appendTableDetail(detailWs, r);
+        r.errors = [];
+        results.push(r);
         this.jobService.incrementDone(jobId);
         continue;
       }
@@ -101,6 +104,7 @@ export class ValidationService {
       let rowsChecked = 0;
       let strategyPassCount = 0;
       let strategyFailCount = 0;
+      let strategyTotalErrors: number | undefined;
       try {
         const strategy = this.strategyFactory.create(commonRule.table_info.table_type);
         const result = await strategy.validate({ commonRule, defRules, affectCodeMap });
@@ -108,6 +112,7 @@ export class ValidationService {
         rowsChecked = result.rowsChecked;
         strategyPassCount = result.passCount;
         strategyFailCount = result.failCount;
+        strategyTotalErrors = result.totalErrors;
       } catch (err) {
         this.logger.error(`[Job:${jobId}] Strategy error for ${tableName}: ${err.message}`);
         errors = [{ errorType: 'TRANSFORM_ERROR', message: `Runtime error: ${err.message}` }];
@@ -119,8 +124,16 @@ export class ValidationService {
 
       // ---- สรุปผล ----
       const missingErrors = errors.filter((e) => e.errorType === 'ROW_MISSING' || e.errorType === 'COLUMN_MISSING' || e.errorType === 'DATA_MISSING');
+      // true total: use strategy-reported count (accounts for capped errors) + sum check errors
+      const trueTotal = (strategyTotalErrors ?? errors.length - sumErrors.length) + sumErrors.length;
 
-      results.push({
+      // Pre-extract remarks from structural errors before clearing the array
+      const remarks = errors
+        .filter((e) => ['COLUMN_MISSING', 'DATA_MISSING', 'TRANSFORM_ERROR'].includes(e.errorType))
+        .map((e) => e.message)
+        .join(' | ');
+
+      const tableResult: TableResult = {
         tableName,
         sourceTable: commonRule.table_info.source,
         targetTable: commonRule.table_info.target,
@@ -128,18 +141,30 @@ export class ValidationService {
         pass: strategyPassCount,
         fail: strategyFailCount,
         skipped: Math.max(0, rowsChecked - strategyPassCount - strategyFailCount),
-        total: errors.length,
+        total: trueTotal,
         missing: missingErrors.length,
         timeSpent: Date.now() - start,
         errors,
-      });
+        remarks,
+      };
 
+      // Flush errors to detail log, then clear from memory (GC eligible)
+      this.reportService.appendTableDetail(detailWs, tableResult);
+      tableResult.errors = [];
+
+      results.push(tableResult);
       this.jobService.incrementDone(jobId);
-      this.logger.log(`[Job:${jobId}] Table ${tableName} done: ${errors.length} error(s)`);
+      this.logger.log(`[Job:${jobId}] Table ${tableName} done: ${trueTotal} error(s) (stored ${errors.length})`);
     }
 
     // ---- เขียน reports ----
-    const reportPaths = await this.reportService.writeReports(jobId, results);
+    reportPaths = await this.reportService.writeFinalReports(jobId, jobDir, detailPath, detailWs, results);
+
+    } catch (err) {
+      // Ensure detail stream is always closed even on unexpected error
+      detailWs.destroy();
+      throw err;
+    }
 
     const summary = results.map((r) => ({
       tableName: r.tableName,

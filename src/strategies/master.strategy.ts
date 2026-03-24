@@ -12,7 +12,7 @@ export class MasterStrategy extends BaseStrategy {
     super(db);
   }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number; totalErrors?: number }> {
     const errors: ValidationError[] = [];
     const { commonRule } = ctx;
     const { source, target } = commonRule.table_info;
@@ -236,13 +236,7 @@ export class MasterStrategy extends BaseStrategy {
       this.logger.log(`[MASTER] Reverse scan complete — no extra rows in target`);
     }
 
-    // passCount/failCount: post-hoc from distinct failing row identifiers (MASTER has no groups).
-    const failingKeys = new Set(
-      errors.filter((e) => e.rowIdentifier).map((e) => e.rowIdentifier!),
-    );
-    const failCount = failingKeys.size;
-    const passCount = Math.max(0, globalIndex - failCount);
-    this.logger.log(`[MASTER] Done: ${errors.length} error(s), ${globalIndex} rows checked, pass=${passCount} fail=${failCount} skipped=${globalIndex - passCount - failCount}`);
-    return { errors, rowsChecked: globalIndex, passCount, failCount };
+    this.logger.log(`[MASTER] Done: ${errors.length} error(s), ${globalIndex} rows checked`);
+    return { errors, rowsChecked: globalIndex, passCount: 0, failCount: 0 };
   }
 }

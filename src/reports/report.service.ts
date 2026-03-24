@@ -12,10 +12,11 @@ export interface TableResult {
   pass: number;          // source rows in groups with 0 errors (independently tracked)
   fail: number;          // source rows in groups with ≥1 error (independently tracked)
   skipped: number;       // rowsChecked - (pass + fail) — should be 0; >0 indicates a bug
-  total: number;         // total error count (errors.length)
+  total: number;         // true total error count (may exceed errors.length when capped)
   missing: number;       // ROW_MISSING + COLUMN_MISSING + DATA_MISSING count
   timeSpent: number;     // ms
   errors: ValidationError[];
+  remarks?: string;      // pre-extracted structural error messages for summary (set before errors is cleared)
 }
 
 @Injectable()
@@ -38,6 +39,61 @@ export class ReportService {
     await this.writeSummary(summaryPath, jobId, results);
     await this.writeDetail(detailPath, results);
 
+    this.logger.log(`Reports written → ${summaryPath} | ${detailPath}`);
+    return [summaryPath, detailPath];
+  }
+
+  // ----------------------------------------------------------------
+  // Incremental write API — used by ValidationService to flush errors
+  // per-table so the errors array can be GC'd between tables.
+  // ----------------------------------------------------------------
+
+  /** Open the detail log for a job. Call once before processing tables. */
+  openDetailLog(jobId: string): { ws: fs.WriteStream; detailPath: string; jobDir: string } {
+    const jobDir = path.join(this.reportsDir, jobId);
+    fs.mkdirSync(jobDir, { recursive: true });
+    const detailPath = path.join(jobDir, 'Detail_Log.csv');
+    const ws = fs.createWriteStream(detailPath, { encoding: 'utf8' });
+    ws.write('\uFEFF');
+    ws.write(csvRow([
+      'Rule', 'Source Table', 'Target Table', 'Error Type',
+      'Group Key', 'Row ID', 'Old Column', 'New Column',
+      'Old Value', 'New Value', 'Def ID', 'Message',
+    ]));
+    return { ws, detailPath, jobDir };
+  }
+
+  /** Append one table's errors to an open detail log stream. Synchronous (buffered). */
+  appendTableDetail(ws: fs.WriteStream, result: TableResult): void {
+    for (const e of result.errors) {
+      ws.write(csvRow([
+        result.tableName,
+        result.sourceTable ?? '',
+        result.targetTable ?? '',
+        e.errorType,
+        e.groupKey      ?? '',
+        e.rowIdentifier ?? '',
+        e.oldColumn     ?? '',
+        e.newColumn     ?? '',
+        e.oldValue != null ? String(e.oldValue) : '',
+        e.newValue != null ? String(e.newValue) : '',
+        e.defId   ?? '',
+        e.message,
+      ]));
+    }
+  }
+
+  /** Close the detail log and write the summary. Returns [summaryPath, detailPath]. */
+  async writeFinalReports(
+    jobId: string,
+    jobDir: string,
+    detailPath: string,
+    detailWs: fs.WriteStream,
+    results: TableResult[],
+  ): Promise<string[]> {
+    await closeStream(detailWs);
+    const summaryPath = path.join(jobDir, 'Summary_Report.csv');
+    await this.writeSummary(summaryPath, jobId, results);
     this.logger.log(`Reports written → ${summaryPath} | ${detailPath}`);
     return [summaryPath, detailPath];
   }
@@ -86,7 +142,7 @@ export class ReportService {
     // ---- Data rows ----
     for (const r of results) {
       const status = r.fail === 0 && r.missing === 0 && r.skipped === 0 && r.total === 0 ? 'PASS' : 'FAIL';
-      const remarks = r.errors
+      const remarks = r.remarks ?? r.errors
         .filter(e => ['COLUMN_MISSING', 'DATA_MISSING', 'TRANSFORM_ERROR'].includes(e.errorType))
         .map(e => e.message)
         .join(' | ');

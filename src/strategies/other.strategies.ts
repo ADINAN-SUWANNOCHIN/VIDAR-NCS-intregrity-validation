@@ -539,11 +539,19 @@ export class UnionStrategy extends BaseStrategy {
 export class MultipleStrategy extends BaseStrategy {
   constructor(db: DatabaseService) { super(db); }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number; totalErrors: number }> {
     const errors: ValidationError[] = [];
     let rowsChecked = 0;
     let passCount = 0;
     let failCount = 0;
+    const MAX_BULK = parseInt(process.env.MAX_ERRORS ?? '50000');
+    let bulkCount = 0;
+    const pushBulk = (...items: ValidationError[]) => {
+      for (const e of items) {
+        bulkCount++;
+        if (bulkCount <= MAX_BULK) errors.push(e);
+      }
+    };
     const { commonRule } = ctx;
     const { source, target } = commonRule.table_info;
     const sm = commonRule.schema_mappings;
@@ -704,22 +712,22 @@ export class MultipleStrategy extends BaseStrategy {
               if (groupKey === carryKey) continue;
               const newGroup = newGroupMap.get(groupKey) ?? [];
               if (newGroup.length === 0) {
-                errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
+                pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
                 continue;
               }
               const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
               const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
-              errors.push(...groupErrors);
+              pushBulk(...groupErrors);
               if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
-                errors.push(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
+                pushBulk(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
               }
-              errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+              pushBulk(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
             }
 
             for (const [groupKey] of newGroupMap) {
               if (groupKey === carryKey) continue;
               if (!oldGroupMap.has(groupKey)) {
-                errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row)` });
+                pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row)` });
               }
             }
 
@@ -731,16 +739,16 @@ export class MultipleStrategy extends BaseStrategy {
           for (const [groupKey, oldGroup] of carryOld) {
             const newGroup = carryNew.get(groupKey) ?? [];
             if (newGroup.length === 0) {
-              errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
+              pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
               continue;
             }
             const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
-            errors.push(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap));
-            errors.push(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+            pushBulk(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap));
+            pushBulk(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
           }
           for (const [groupKey] of carryNew) {
             if (!carryOld.has(groupKey)) {
-              errors.push({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row in carry)` });
+              pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] found in ${tgtTable} but not in ${srcTable} (extra row in carry)` });
             }
           }
           } finally {
@@ -938,8 +946,15 @@ export class MultipleStrategy extends BaseStrategy {
         }
       }
 
-      this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount} skipped=${rowsChecked - passCount - failCount}`);
-      return { errors, rowsChecked, passCount, failCount };
+      const totalErrors = errors.length + Math.max(0, bulkCount - MAX_BULK);
+      if (bulkCount > MAX_BULK) {
+        errors.push({
+          errorType: 'TRANSFORM_ERROR',
+          message: `[ERROR_CAP] Stored ${MAX_BULK.toLocaleString()} of ${bulkCount.toLocaleString()} bulk errors. Increase MAX_ERRORS env var (default: 50000) to see all.`,
+        });
+      }
+      this.logger.log(`[MULTIPLE] Done: ${totalErrors} error(s) (stored ${errors.length}), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount}`);
+      return { errors, rowsChecked, passCount, failCount, totalErrors };
     }
 
     // ---- Row-mode: no transaction_grouping → 1:1 anchor key lookup (original behavior) ----
@@ -1060,7 +1075,7 @@ export class MultipleStrategy extends BaseStrategy {
     failCount = rowFailKeys.size;
     passCount = Math.max(0, rowsChecked - failCount);
     this.logger.log(`[MULTIPLE] Done: ${errors.length} error(s), ${rowsChecked} rows checked, pass=${passCount} fail=${failCount}`);
-    return { errors, rowsChecked, passCount, failCount };
+    return { errors, rowsChecked, passCount, failCount, totalErrors: errors.length };
   }
 
   // ----------------------------------------------------------------
