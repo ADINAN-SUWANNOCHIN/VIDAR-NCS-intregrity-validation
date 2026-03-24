@@ -12,7 +12,7 @@ export class MasterStrategy extends BaseStrategy {
     super(db);
   }
 
-  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }> {
+  async validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number; passCount: number; failCount: number; totalErrors?: number }> {
     const errors: ValidationError[] = [];
     const { commonRule } = ctx;
     const { source, target } = commonRule.table_info;
@@ -61,7 +61,7 @@ export class MasterStrategy extends BaseStrategy {
       (sm.concat_matches?.length ?? 0) > 0;
     if (!hasMappings) {
       this.logger.warn(`[MASTER] No valid mappings remain after schema check — skipping data comparison`);
-      return { errors, rowsChecked: 0 };
+      return { errors, rowsChecked: 0, passCount: 0, failCount: 0 };
     }
 
     // ---- 2. Anchor key uniqueness check ----
@@ -237,6 +237,6 @@ export class MasterStrategy extends BaseStrategy {
     }
 
     this.logger.log(`[MASTER] Done: ${errors.length} error(s), ${globalIndex} rows checked`);
-    return { errors, rowsChecked: globalIndex };
+    return { errors, rowsChecked: globalIndex, passCount: 0, failCount: 0 };
   }
 }

@@ -26,7 +26,13 @@ export abstract class BaseStrategy {
     this.logger = new Logger(this.constructor.name);
   }
 
-  abstract validate(ctx: ValidationContext): Promise<{ errors: ValidationError[]; rowsChecked: number }>;
+  abstract validate(ctx: ValidationContext): Promise<{
+    errors: ValidationError[];
+    rowsChecked: number;
+    passCount: number;   // source rows in groups with 0 errors (independent counter)
+    failCount: number;   // source rows in groups with ≥1 error (independent counter)
+    totalErrors?: number; // true error count — may exceed errors.length when capped by MAX_ERRORS
+  }>;
 
   // ----------------------------------------------------------------
   // Schema helpers
