@@ -132,7 +132,9 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     this.assertAvailable();
     if (rows.length === 0) return;
 
-    const BATCH = 500;
+    // PG wire protocol uses Int16 for parameter count — hard limit 65535.
+    // Cap rows-per-batch so (rows × columns) never exceeds 65000.
+    const BATCH = columnNames.length > 0 ? Math.min(500, Math.floor(65000 / columnNames.length)) : 500;
     for (let i = 0; i < rows.length; i += BATCH) {
       const batch = rows.slice(i, i + BATCH);
       const valueRows: string[] = [];
