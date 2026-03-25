@@ -15,9 +15,11 @@ import { IsArray, IsOptional, IsString } from 'class-validator';
 import * as express from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import archiver = require('archiver');
 import { ValidationService } from './validation.service';
 import { PresetService } from './preset.service';
 import { JobService } from '../job/job.service';
+import { PgCacheService } from '../database/pg-cache.service';
 import { ValidationRequestDto } from '../dto/validation-request.dto';
 import { JobRecord } from '../job/job.types';
 
@@ -47,6 +49,7 @@ export class ValidationController {
     private readonly validationService: ValidationService,
     private readonly jobService: JobService,
     private readonly presetService: PresetService,
+    private readonly pg: PgCacheService,
   ) {}
 
   /**
@@ -97,12 +100,13 @@ export class ValidationController {
 
   /**
    * GET /validation/download/:jobId
-   * Streams the job's report file as a download attachment.
-   * No query param needed — serves the single Validation_Report.xlsx automatically.
-   * Optional ?file= param still accepted for backwards compatibility.
+   * Downloads all report files for a job as a ZIP archive.
+   * Optional ?file= param to download a single file by name instead.
    *
-   * Example:
-   *   GET /validation/download/abc123
+   * Examples:
+   *   GET /validation/download/abc123                          → ZIP with all reports
+   *   GET /validation/download/abc123?file=Summary_Report.csv → single file
+   *   GET /validation/download/abc123?file=Detail_Log.csv     → single file
    */
   @Get('download/:jobId')
   async downloadReport(
@@ -119,29 +123,54 @@ export class ValidationController {
       throw new NotFoundException(`No report files found for job ${jobId}`);
     }
 
-    // If ?file= specified, match by filename. Otherwise serve the first (and only) report.
-    const reportPath = file
-      ? reportPaths.find((p) => path.basename(p) === path.basename(file))
-      : reportPaths[0];
+    // Single-file download when ?file= is specified
+    if (file) {
+      const reportPath = reportPaths.find((p) => path.basename(p) === path.basename(file));
+      if (!reportPath) {
+        throw new NotFoundException(
+          `File "${file}" not found. Available: ${reportPaths.map((p) => path.basename(p)).join(', ')}`,
+        );
+      }
+      const absPath = path.resolve(reportPath);
+      const filename = path.basename(absPath);
+      const contentType = filename.endsWith('.xlsx')
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'text/csv; charset=utf-8';
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-    if (!reportPath) {
-      throw new NotFoundException(
-        `File "${file}" not found in job reports. Available: ${reportPaths.map((p) => path.basename(p)).join(', ')}`,
-      );
+      if (fs.existsSync(absPath)) {
+        fs.createReadStream(absPath).pipe(res);
+      } else {
+        // Disk file missing (pod restarted) — serve from PostgreSQL
+        const buf = await this.pg.loadReport(jobId, filename);
+        if (!buf) throw new NotFoundException(`Report not found on disk or in database: ${filename}`);
+        res.end(buf);
+      }
+      return;
     }
 
-    const absPath = path.resolve(reportPath);
-    if (!fs.existsSync(absPath)) {
-      throw new NotFoundException(`Report file not found on disk: ${reportPath}`);
+    // Default: stream all report files as a ZIP
+    const zipName = `validation_${jobId.slice(0, 8)}.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.pipe(res);
+
+    for (const p of reportPaths) {
+      const absPath = path.resolve(p);
+      const filename = path.basename(absPath);
+      if (fs.existsSync(absPath)) {
+        archive.file(absPath, { name: filename });
+      } else {
+        // Fall back to PG for files missing from disk
+        const buf = await this.pg.loadReport(jobId, filename);
+        if (buf) archive.append(buf, { name: filename });
+      }
     }
 
-    const filename = path.basename(absPath);
-    const contentType = filename.endsWith('.xlsx')
-      ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      : 'text/csv; charset=utf-8';
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    fs.createReadStream(absPath).pipe(res);
+    await archive.finalize();
   }
 
   /**

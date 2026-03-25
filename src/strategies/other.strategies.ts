@@ -713,15 +713,18 @@ export class MultipleStrategy extends BaseStrategy {
               const newGroup = newGroupMap.get(groupKey) ?? [];
               if (newGroup.length === 0) {
                 pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
+                failCount += oldGroup.length;
                 continue;
               }
               const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
               const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
+              const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
               pushBulk(...groupErrors);
               if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
                 pushBulk(...this.fingerprintDiff(groupKey, oldGroup, newGroup, tg.row_fingerprint));
               }
-              pushBulk(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+              pushBulk(...defErrors);
+              if (groupErrors.length + defErrors.length === 0) { passCount += oldGroup.length; } else { failCount += oldGroup.length; }
             }
 
             for (const [groupKey] of newGroupMap) {
@@ -740,11 +743,15 @@ export class MultipleStrategy extends BaseStrategy {
             const newGroup = carryNew.get(groupKey) ?? [];
             if (newGroup.length === 0) {
               pushBulk({ errorType: 'ROW_MISSING', groupKey, message: `[MULTIPLE] Group [${groupKey}] from ${srcTable} not found in ${tgtTable}` });
+              failCount += oldGroup.length;
               continue;
             }
             const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
-            pushBulk(...this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap));
-            pushBulk(...this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance));
+            const flushGe = this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap);
+            const flushDe = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
+            pushBulk(...flushGe);
+            pushBulk(...flushDe);
+            if (flushGe.length + flushDe.length === 0) { passCount += oldGroup.length; } else { failCount += oldGroup.length; }
           }
           for (const [groupKey] of carryNew) {
             if (!carryOld.has(groupKey)) {
