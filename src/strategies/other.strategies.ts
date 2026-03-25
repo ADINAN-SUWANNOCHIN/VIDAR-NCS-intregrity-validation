@@ -667,7 +667,13 @@ export class MultipleStrategy extends BaseStrategy {
         // srcFilter is baked into the cache so no filter is needed in subsequent fetchChunk calls.
         if (tg.use_sysref_sort) {
           const tempName = `dv_src_${process.pid}_${DatabaseService.nextCacheSeq()}`;
-          await this.db.createSourceCache(srcTable, tempName, srcKeyCol, commonRule.anchor_key.old, srcFilter);
+          const sysrefInCache = await this.db.createSourceCache(srcTable, tempName, srcKeyCol, commonRule.anchor_key.old, srcFilter);
+          if (!sysrefInCache) {
+            // Source table doesn't have the sysref column — comparison skipped for this source.
+            // Aggregate SUM check (in ValidationService) still validates totals.
+            await this.db.dropSourceCache(tempName);
+            continue;
+          }
           let lastKey: unknown = null;
           let carryOld = new Map<string, Record<string, unknown>[]>();
           let carryNew = new Map<string, Record<string, unknown>[]>();
