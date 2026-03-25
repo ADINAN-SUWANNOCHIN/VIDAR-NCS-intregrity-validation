@@ -456,15 +456,24 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
    * An optional filter (source_filter from common.yaml) limits which rows are copied so
    * excluded rows (BF, CAL_INT, B_DIFF) are never in the cache.
    */
+  /**
+   * Returns true if sysrefCol exists in the source table (and was indexed).
+   * Returns false if sysrefCol is missing — caller should skip sysref-sort for this source.
+   */
   async createSourceCache(
     sourceTable: string,
     tempName: string,
     sysrefCol: string,
     idCol: string,
     filter?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const filterClause = filter ? `WHERE (${filter})` : '';
-    await this.copyToPostgres(sourceTable, tempName, filterClause, [sysrefCol, idCol], 'SrcCache');
+    const cols = await this.copyToPostgres(sourceTable, tempName, filterClause, [sysrefCol, idCol], 'SrcCache');
+    const sysrefFound = cols.includes(sysrefCol);
+    if (!sysrefFound) {
+      this.logger.warn(`[SrcCache] Column "${sysrefCol}" not found in ${sourceTable} — sysref-sort skipped for this source`);
+    }
+    return sysrefFound;
   }
 
   /** Drops the PostgreSQL cache table created by createSourceCache. */
@@ -515,7 +524,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     filterClause: string,
     indexCols: string[],
     logPrefix: string,
-  ): Promise<void> {
+  ): Promise<string[]> {
     await this.pg.dropCacheTable(tempName);
     this.logger.log(`[${logPrefix}] Copying ${sourceTable} → PG:${tempName}...`);
 
@@ -584,7 +593,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log(`[${logPrefix}] Inserted ${totalRows} rows → PG:${tempName}, building index...`);
-    await this.pg.createIndex(tempName, indexCols);
+    const validIndexCols = indexCols.filter((c) => columnNames.includes(c));
+    if (validIndexCols.length > 0) {
+      await this.pg.createIndex(tempName, validIndexCols);
+    }
     this.logger.log(`[${logPrefix}] Ready: PG:${tempName}`);
+    return columnNames;
   }
 }
