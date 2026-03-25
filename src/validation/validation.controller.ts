@@ -19,6 +19,7 @@ import archiver = require('archiver');
 import { ValidationService } from './validation.service';
 import { PresetService } from './preset.service';
 import { JobService } from '../job/job.service';
+import { PgCacheService } from '../database/pg-cache.service';
 import { ValidationRequestDto } from '../dto/validation-request.dto';
 import { JobRecord } from '../job/job.types';
 
@@ -48,6 +49,7 @@ export class ValidationController {
     private readonly validationService: ValidationService,
     private readonly jobService: JobService,
     private readonly presetService: PresetService,
+    private readonly pg: PgCacheService,
   ) {}
 
   /**
@@ -130,16 +132,21 @@ export class ValidationController {
         );
       }
       const absPath = path.resolve(reportPath);
-      if (!fs.existsSync(absPath)) {
-        throw new NotFoundException(`Report file not found on disk: ${reportPath}`);
-      }
       const filename = path.basename(absPath);
       const contentType = filename.endsWith('.xlsx')
         ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         : 'text/csv; charset=utf-8';
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      fs.createReadStream(absPath).pipe(res);
+
+      if (fs.existsSync(absPath)) {
+        fs.createReadStream(absPath).pipe(res);
+      } else {
+        // Disk file missing (pod restarted) — serve from PostgreSQL
+        const buf = await this.pg.loadReport(jobId, filename);
+        if (!buf) throw new NotFoundException(`Report not found on disk or in database: ${filename}`);
+        res.end(buf);
+      }
       return;
     }
 
@@ -153,8 +160,13 @@ export class ValidationController {
 
     for (const p of reportPaths) {
       const absPath = path.resolve(p);
+      const filename = path.basename(absPath);
       if (fs.existsSync(absPath)) {
-        archive.file(absPath, { name: path.basename(absPath) });
+        archive.file(absPath, { name: filename });
+      } else {
+        // Fall back to PG for files missing from disk
+        const buf = await this.pg.loadReport(jobId, filename);
+        if (buf) archive.append(buf, { name: filename });
       }
     }
 

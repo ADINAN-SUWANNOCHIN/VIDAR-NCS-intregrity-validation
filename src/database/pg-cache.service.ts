@@ -46,6 +46,16 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
         )
       `);
 
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS ${this.schema}.reports (
+          job_id     TEXT NOT NULL,
+          filename   TEXT NOT NULL,
+          content    BYTEA NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (job_id, filename)
+        )
+      `);
+
       // Drop any orphan cache tables left from a previous crashed run
       const orphans = await this.pool.query(`
         SELECT table_name FROM information_schema.tables
@@ -101,6 +111,40 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
       `SELECT record FROM ${this.schema}.jobs ORDER BY (record->>'createdAt') DESC`,
     );
     return res.rows.map((r) => r.record as JobRecord);
+  }
+
+  // ----------------------------------------------------------------
+  // Report persistence — survives pod restarts
+  // ----------------------------------------------------------------
+
+  /** Persist a report file to PostgreSQL so it can be served after pod restart. */
+  async saveReport(jobId: string, filename: string, content: Buffer): Promise<void> {
+    if (!this.pool) return;
+    try {
+      await this.pool.query(
+        `INSERT INTO ${this.schema}.reports (job_id, filename, content, created_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (job_id, filename) DO UPDATE SET content = $3, created_at = NOW()`,
+        [jobId, filename, content],
+      );
+    } catch (e: any) {
+      this.logger.warn(`[Reports] Failed to persist ${filename} for job ${jobId}: ${e.message}`);
+    }
+  }
+
+  /** Load a report file from PostgreSQL. Returns null if not found. */
+  async loadReport(jobId: string, filename: string): Promise<Buffer | null> {
+    if (!this.pool) return null;
+    try {
+      const res = await this.pool.query(
+        `SELECT content FROM ${this.schema}.reports WHERE job_id = $1 AND filename = $2`,
+        [jobId, filename],
+      );
+      return res.rows[0]?.content ?? null;
+    } catch (e: any) {
+      this.logger.warn(`[Reports] Failed to load ${filename} for job ${jobId}: ${e.message}`);
+      return null;
+    }
   }
 
   // ----------------------------------------------------------------

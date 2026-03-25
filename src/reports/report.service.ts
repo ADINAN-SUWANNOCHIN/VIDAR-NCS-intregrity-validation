@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ValidationError } from '../rules/rule.types';
+import { PgCacheService } from '../database/pg-cache.service';
 
 export interface TableResult {
   tableName: string;
@@ -24,7 +25,10 @@ export class ReportService {
   private readonly logger = new Logger(ReportService.name);
   private readonly reportsDir: string;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly pg: PgCacheService,
+  ) {
     this.reportsDir = this.config.get<string>('REPORTS_DIR') ?? './reports';
     fs.mkdirSync(this.reportsDir, { recursive: true });
   }
@@ -95,6 +99,13 @@ export class ReportService {
     const summaryPath = path.join(jobDir, 'Summary_Report.csv');
     await this.writeSummary(summaryPath, jobId, results);
     this.logger.log(`Reports written → ${summaryPath} | ${detailPath}`);
+
+    // Persist both files to PostgreSQL so they survive pod restarts
+    await Promise.all([
+      fs.promises.readFile(summaryPath).then((buf) => this.pg.saveReport(jobId, 'Summary_Report.csv', buf)),
+      fs.promises.readFile(detailPath).then((buf) => this.pg.saveReport(jobId, 'Detail_Log.csv', buf)),
+    ]).catch((e) => this.logger.warn(`[Reports] PG persist failed: ${e.message}`));
+
     return [summaryPath, detailPath];
   }
 
