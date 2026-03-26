@@ -681,13 +681,15 @@ export class MultipleStrategy extends BaseStrategy {
             await this.db.dropSourceCache(tempName);
             continue;
           }
-          let lastKey: unknown = null;
+          let lastSysrefKey: string | null = null;
+          let lastIdKey: string | null = null;
           let carryOld = new Map<string, Record<string, unknown>[]>();
           let carryNew = new Map<string, Record<string, unknown>[]>();
+          const anchorKeyOld = commonRule.anchor_key.old;
 
           try {
           while (true) {
-            const oldChunk = await this.db.fetchChunkCache(tempName, srcKeyCol, chunkSize, lastKey);
+            const oldChunk = await this.db.fetchChunkCacheSysref(tempName, srcKeyCol, anchorKeyOld, chunkSize, lastSysrefKey, lastIdKey);
             if (oldChunk.length === 0) break;
 
             const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
@@ -747,7 +749,8 @@ export class MultipleStrategy extends BaseStrategy {
               }
             }
 
-            lastKey = oldChunk[oldChunk.length - 1][srcKeyCol];
+            lastSysrefKey = String(oldChunk[oldChunk.length - 1][srcKeyCol] ?? '');
+            lastIdKey = String(oldChunk[oldChunk.length - 1][anchorKeyOld] ?? '');
             if (isLastChunk) break;
           }
 

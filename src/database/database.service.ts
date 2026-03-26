@@ -499,6 +499,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.pg.fetchChunk(tableName, keyCol, chunkSize, lastKey);
   }
 
+  /** Composite-keyset fetch for sysref-sorted caches. See PgCacheService.fetchChunkSysref. */
+  async fetchChunkCacheSysref(
+    tableName: string,
+    sysrefCol: string,
+    idCol: string,
+    chunkSize: number,
+    lastSysref: string | null,
+    lastId: string | null,
+  ): Promise<Record<string, unknown>[]> {
+    return this.pg.fetchChunkSysref(tableName, sysrefCol, idCol, chunkSize, lastSysref, lastId);
+  }
+
   /**
    * Fetch rows by key list from a PostgreSQL cache table.
    * Drop-in replacement for streamRowsByKeys() when the table is a PG cache.

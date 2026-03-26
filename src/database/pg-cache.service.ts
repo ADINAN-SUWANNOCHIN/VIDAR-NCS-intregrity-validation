@@ -233,6 +233,37 @@ export class PgCacheService implements OnModuleInit, OnModuleDestroy {
     return res.rows as Record<string, unknown>[];
   }
 
+  /**
+   * Composite-keyset fetch for sysref-sorted caches (ORDER BY sysref, id).
+   * Uses (sysref > lastSysref) OR (sysref = lastSysref AND id > lastId) so that
+   * rows belonging to the boundary sysref are NOT skipped when a group spans a chunk boundary.
+   * Without this, the simple sysref > lastSysref skips remaining rows of the last sysref
+   * in each chunk — causing partial-group false mismatches for multi-row sysref groups.
+   */
+  async fetchChunkSysref(
+    tableName: string,
+    sysrefCol: string,
+    idCol: string,
+    chunkSize: number,
+    lastSysref: string | null,
+    lastId: string | null,
+  ): Promise<Record<string, unknown>[]> {
+    this.assertAvailable();
+    const res =
+      lastSysref == null
+        ? await this.pool.query(
+            `SELECT * FROM ${this.schema}."${tableName}" ORDER BY "${sysrefCol}", "${idCol}" LIMIT $1`,
+            [chunkSize],
+          )
+        : await this.pool.query(
+            `SELECT * FROM ${this.schema}."${tableName}"
+             WHERE "${sysrefCol}" > $1 OR ("${sysrefCol}" = $1 AND "${idCol}" > $2)
+             ORDER BY "${sysrefCol}", "${idCol}" LIMIT $3`,
+            [lastSysref, lastId, chunkSize],
+          );
+    return res.rows as Record<string, unknown>[];
+  }
+
   /** Fetch all rows whose keyCol value is in the given keys list. */
   async fetchByKeys(
     tableName: string,

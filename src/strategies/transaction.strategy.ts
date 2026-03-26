@@ -732,13 +732,14 @@ export class TransactionStrategy extends BaseStrategy {
     // ---- Sysref-sorted carry-over loop ----
     // No anchor key uniqueness check — sysref is not unique per row.
     // fetchChunk against temp table uses clustered sysref index → O(1) per chunk.
-    let lastSysref: unknown = null;
+    let lastSysref: string | null = null;
+    let lastSysrefId: string | null = null;
     let carryOld = new Map<string, Record<string, unknown>[]>();
     let carryNew = new Map<string, Record<string, unknown>[]>();
 
     try {
     while (true) {
-      const oldChunk = await this.db.fetchChunkCache(tempName, oldKeyCol, chunkSize, lastSysref);
+      const oldChunk = await this.db.fetchChunkCacheSysref(tempName, oldKeyCol, anchorKeyOld, chunkSize, lastSysref, lastSysrefId);
       if (oldChunk.length === 0) break;
 
       const oldGroupMap = new Map<string, Record<string, unknown>[]>(carryOld);
@@ -801,7 +802,8 @@ export class TransactionStrategy extends BaseStrategy {
         }
       }
 
-      lastSysref = oldChunk[oldChunk.length - 1][oldKeyCol];
+      lastSysref = String(oldChunk[oldChunk.length - 1][oldKeyCol] ?? '');
+      lastSysrefId = String(oldChunk[oldChunk.length - 1][anchorKeyOld] ?? '');
       if (isLastChunk) break;
     }
 

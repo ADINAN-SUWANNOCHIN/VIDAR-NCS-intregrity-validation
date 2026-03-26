@@ -658,8 +658,14 @@ export abstract class BaseStrategy {
   protected normalizeFingerprint(v: unknown): string {
     if (v instanceof Date) return v.toISOString().slice(0, 10);
     const s = String(v ?? '').trim();
+    // ISO datetime → date only
     const dateMatch = s.match(/^(\d{4}-\d{2}-\d{2})T/);
     if (dateMatch) return dateMatch[1];
+    // JS Date.toString() format: "Mon Aug 09 2021 00:00:00 GMT+0000 ..."
+    if (/^[A-Za-z]{3} [A-Za-z]{3} \d{2} \d{4}/.test(s)) {
+      const d = new Date(s);
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    }
     const n = parseFloat(s);
     if (!isNaN(n) && s !== '') return String(n);
     return s;
