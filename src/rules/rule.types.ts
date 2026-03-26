@@ -244,6 +244,7 @@ export interface DefAction {
   trigger_condition?: {
     must_have_all?: string[];
     must_have_any?: string[];
+    groupkey_not_starts_with?: string[];
   };
   variables?: Record<string, string>;
   condition: string;
@@ -256,6 +257,7 @@ export interface DefRule {
   trigger_condition?: {
     must_have_all?: string[];
     must_have_any?: string[];
+    groupkey_not_starts_with?: string[];
   };
   actions: DefAction[];
 }

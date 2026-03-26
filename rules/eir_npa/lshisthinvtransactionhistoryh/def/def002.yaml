@@ -1,0 +1,162 @@
+# ============================================================
+# def002 — Format Column Duplication Check
+# Scope: eir_npa / lshisthinvtransactionhistoryh
+#
+# Business context:
+#   Format columns (lsformat*, laformat*) are account-level balance
+#   snapshots taken at the time of the transaction. They describe
+#   the account state — NOT individual ledger entries.
+#
+#   In CONV (old): format values are DENORMALIZED — every row in the
+#   group carries the same identical value (e.g. all 4 rows of
+#   ITEM6303000742 have lsformatbfaccint = -693.58).
+#
+#   In NCS H-table (new): format values should appear on exactly ONE
+#   row per group — the main header row (the row carrying transactionamount).
+#   The I1/C and I1/D interest ledger rows should have format columns = 0.
+#
+#   Migration bug detected here:
+#   ALL H rows in a group carry the format value instead of just the
+#   main row. This causes SUM(new.format_col) to be N× the expected
+#   value (where N = number of H rows per group).
+#
+# Detection method:
+#   SUM(old.format_col[affectcode=QQ][debitcredit=C]) isolates exactly
+#   ONE old row's value (QQ/C is always a single row per group).
+#   This gives the canonical single-instance value.
+#   SUM(new.format_col) should equal this — 1× the value.
+#   If duplicated across N H rows: SUM(new) = N× → mismatch → flagged.
+#
+# Trigger:
+#   QQ must be present in the old group. Groups without QQ (e.g.
+#   interest-accrual-only adjustments) typically have all-zero format
+#   columns and are excluded to avoid false positives.
+#
+# Example (ITEM6303000742):
+#   OLD: 4 rows all carrying lsformatbfaccint = -693.58
+#   NEW: 3 H rows all carrying lsformatbfaccint = -693.58 → SUM = -2080.74
+#   Expected: SUM = -693.58 (single main row only)
+# ============================================================
+
+def_id: def002
+target_scope: transaction_group
+
+trigger_condition:
+  must_have_any: [QQ]
+
+actions:
+  # -------------------------------------------------------
+  # Step 1: lsformatbfaccint — accrued interest balance before transaction
+  # -------------------------------------------------------
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.lsformatbfaccint[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.lsformatbfaccint)"
+    condition: "val_old == val_new"
+    error_message: >
+      lsformatbfaccint is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.
+
+  # -------------------------------------------------------
+  # Step 2: laformatcreditpp — cumulative credited principal
+  # -------------------------------------------------------
+  - step: "2"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.laformatcreditpp[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.laformatcreditpp)"
+    condition: "val_old == val_new"
+    error_message: >
+      laformatcreditpp is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.
+
+  # -------------------------------------------------------
+  # Step 3: lsformatdiffincome — income difference amount
+  # -------------------------------------------------------
+  - step: "3"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.lsformatdiffincome[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.lsformatdiffincome)"
+    condition: "val_old == val_new"
+    error_message: >
+      lsformatdiffincome is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.
+
+  # -------------------------------------------------------
+  # Step 4: laformatbfaccint — accrued interest balance before transaction (la variant)
+  # -------------------------------------------------------
+  - step: "4"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.laformatbfaccint[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.laformatbfaccint)"
+    condition: "val_old == val_new"
+    error_message: >
+      laformatbfaccint is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.
+
+  # -------------------------------------------------------
+  # Step 5: laformatsumintpayment — cumulative interest payment sum
+  # -------------------------------------------------------
+  - step: "5"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.laformatsumintpayment[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.laformatsumintpayment)"
+    condition: "val_old == val_new"
+    error_message: >
+      laformatsumintpayment is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.
+
+  # -------------------------------------------------------
+  # Step 6: lsformattdrdiffincome — TDR income difference amount
+  # NOTE: typically 0 for most groups — step still runs but
+  # will produce no errors when both sides are 0.
+  # -------------------------------------------------------
+  - step: "6"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.lsformattdrdiffincome[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.lsformattdrdiffincome)"
+    condition: "val_old == val_new"
+    error_message: >
+      lsformattdrdiffincome is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.
+
+  # -------------------------------------------------------
+  # Step 7: laformatbfggpayment — balance before guarantee payment
+  # NOTE: typically 0 for most groups.
+  # -------------------------------------------------------
+  - step: "7"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.laformatbfggpayment[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.laformatbfggpayment)"
+    condition: "val_old == val_new"
+    error_message: >
+      laformatbfggpayment is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.
+
+  # -------------------------------------------------------
+  # Step 8: laformatggpayment — guarantee payment amount
+  # NOTE: typically 0 for most groups.
+  # -------------------------------------------------------
+  - step: "8"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_old: "SUM(old.laformatggpayment[affectcode=QQ][debitcredit=C])"
+      val_new: "SUM(new.laformatggpayment)"
+    condition: "val_old == val_new"
+    error_message: >
+      laformatggpayment is duplicated across multiple H rows.
+      Expected (1x from old QQ/C row): {val_old}, actual SUM(new): {val_new}.
+      Only the main H row (transactionamount row) should carry this value.

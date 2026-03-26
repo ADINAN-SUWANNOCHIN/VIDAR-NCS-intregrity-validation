@@ -370,6 +370,8 @@ export abstract class BaseStrategy {
         }
       }
 
+      if (def.trigger_condition?.groupkey_not_starts_with?.some((prefix) => groupKey.startsWith(prefix))) continue;
+
       for (const action of def.actions) {
         // Per-action trigger_condition — e.g. step 7 only fires when group has PP rows
         if (action.trigger_condition?.must_have_all || action.trigger_condition?.must_have_any) {
@@ -381,6 +383,7 @@ export abstract class BaseStrategy {
             if (!action.trigger_condition.must_have_any.some((code) => oldAffectCodes.has(code))) continue;
           }
         }
+        if (action.trigger_condition?.groupkey_not_starts_with?.some((prefix) => groupKey.startsWith(prefix))) continue;
         errors.push(...this.evaluateDefAction(def.def_id, groupKey, oldGroup, newGroup, action, tolerance));
       }
     }
