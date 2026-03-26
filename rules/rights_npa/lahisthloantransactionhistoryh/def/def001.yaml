@@ -112,6 +112,7 @@ actions:
     check_type: ROW_LEVEL_COHESION
     trigger_condition:
       must_have_any: [I1]
+      groupkey_not_starts_with: [ADJM]
     variables:
       val_credit: "SUM(new.creditinterestamount)"
       val_debit: "SUM(new.debitinterestamount)"

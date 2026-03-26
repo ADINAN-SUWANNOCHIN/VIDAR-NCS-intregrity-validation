@@ -180,21 +180,9 @@ schema_mappings:
     - old: otherchargeb4t
       new: otherchargeb4t
 
-    - old: nextpaymentduedateb4t
-      new: nextpaymentduedateb4t
-
-    - old: interestpaymentduedateb4t
-      new: interestpaymentduedateb4t
-
-    # --- H-specific ratio/proportion columns (if present in regular table) ---
-    - old: sbtratio
-      new: sbtratio
-
-    - old: citratio
-      new: citratio
-
     # NOTE: laformatnetpay, intascitproportion, intassbtproportion, sbtamount, localtax,
     #   totaltax, sbtratio, citratio, sbtaslnaccureinterest — only in H table → excluded
+    # NOTE: sbtratio, citratio removed — columns only exist in H table, not in crosscheck target
     # NOTE: runningbalance columns (currentbalancerunningbalance, etc.) — only in H table → excluded
 
   transformed_matches:
@@ -238,6 +226,16 @@ schema_mappings:
 
     - old: endinterestdate
       new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
+
+    # b4t date columns: stored as datetime2 in H, nvarchar in regular table
+    # exact_matches gives TZ-sensitive string mismatch — must use DATE_TO_DATETIME
+    - old: nextpaymentduedateb4t
+      new: nextpaymentduedateb4t
+      transform_rule: DATE_TO_DATETIME
+
+    - old: interestpaymentduedateb4t
+      new: interestpaymentduedateb4t
       transform_rule: DATE_TO_DATETIME
 
   # bill* columns in regular table = creditXamount - debitXamount in H table

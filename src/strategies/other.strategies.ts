@@ -579,6 +579,7 @@ export class MultipleStrategy extends BaseStrategy {
       concat: typeof sm.concat_matches;
       split: typeof sm.split_matches;
       formula: typeof sm.formula_matches;
+      filteredSum: typeof sm.filtered_sum_matches;
     }
 
     const pairMap = new Map<string, PairMappings & MappingPair>();
@@ -586,7 +587,7 @@ export class MultipleStrategy extends BaseStrategy {
     const getOrCreate = (srcTable: string, tgtTable: string) => {
       const key = pairKey({ srcTable, tgtTable });
       if (!pairMap.has(key)) {
-        pairMap.set(key, { srcTable, tgtTable, exact: [], transformed: [], concat: [], split: [], formula: [] });
+        pairMap.set(key, { srcTable, tgtTable, exact: [], transformed: [], concat: [], split: [], formula: [], filteredSum: [] });
       }
       return pairMap.get(key)!;
     };
@@ -606,6 +607,9 @@ export class MultipleStrategy extends BaseStrategy {
     }
     for (const m of sm.formula_matches ?? []) {
       getOrCreate(defaultSrc, defaultTgt).formula!.push(m);
+    }
+    for (const m of sm.filtered_sum_matches ?? []) {
+      getOrCreate(defaultSrc, defaultTgt).filteredSum!.push(m);
     }
     errors.push(...await this.reportUnmappedColumns(defaultSrc, defaultTgt, sm, 'MULTIPLE'));
 
@@ -628,6 +632,9 @@ export class MultipleStrategy extends BaseStrategy {
           ...(pair.exact ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
           ...(pair.transformed ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
           ...(pair.concat ?? []).map((m) => ({ oldCols: m.old_cols ?? [], newCols: [m.new] })),
+          ...(pair.split ?? []).map((m) => ({ oldCols: [m.old], newCols: m.new_cols ?? [] })),
+          ...(pair.formula ?? []).map((m) => ({ oldCols: m.old_cols ?? [], newCols: [m.new] })),
+          ...(pair.filteredSum ?? []).map((m) => ({ oldCols: [m.old], newCols: [m.new] })),
         ]);
         if (pairColErrors.length > 0) {
           errors.push(...pairColErrors);
@@ -639,7 +646,7 @@ export class MultipleStrategy extends BaseStrategy {
       }
 
       for (const pair of pairMap.values()) {
-        const { srcTable, tgtTable, exact, transformed, concat, split, formula } = pair;
+        const { srcTable, tgtTable, exact, transformed, concat, split, formula, filteredSum } = pair;
 
         // Per-source group key: use source_key_aliases if defined for this source,
         // otherwise fall back to tg.keys.old (the shared default).
@@ -722,7 +729,7 @@ export class MultipleStrategy extends BaseStrategy {
                 failCount += oldGroup.length;
                 continue;
               }
-              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
               const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
               const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
               pushBulk(...groupErrors);
@@ -752,7 +759,7 @@ export class MultipleStrategy extends BaseStrategy {
               failCount += oldGroup.length;
               continue;
             }
-            const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+            const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
             const flushGe = this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap);
             const flushDe = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
             pushBulk(...flushGe);
@@ -816,7 +823,7 @@ export class MultipleStrategy extends BaseStrategy {
                 });
                 continue;
               }
-              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
               const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
               errors.push(...groupErrors);
               if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
@@ -905,7 +912,7 @@ export class MultipleStrategy extends BaseStrategy {
               failCount += oldGroup.length;
               continue;
             }
-            const pairSmCo: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+            const pairSmCo: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
             const ge = this.validateGroup(groupKey, oldGroup, newGroup, pairSmCo, tolerance, noisyMap);
             errors.push(...ge);
             const de = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
@@ -941,7 +948,7 @@ export class MultipleStrategy extends BaseStrategy {
             failCount += oldGroup.length;
             continue;
           }
-          const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula };
+          const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
           const ge = this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap);
           errors.push(...ge);
           const de = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
@@ -1107,17 +1114,19 @@ export class MultipleStrategy extends BaseStrategy {
 
     for (const m of mappings.exact_matches ?? []) {
       if (this.isNoisyType(noisyMap.get(m.old))) continue;
-      const oldTotal = this.sumColumn(oldGroup, m.old);
-      const newTotal = this.sumColumn(newGroup, m.new);
-      if (oldTotal !== null && newTotal !== null && Math.abs(oldTotal - newTotal) > tolerance) {
+      const oldVals = [...new Set(oldGroup.map((r) => String(r[m.old] ?? '').trim()))]
+        .filter((v) => v !== '').sort().join('|');
+      const newVals = [...new Set(newGroup.map((r) => String(r[m.new] ?? '').trim()))]
+        .filter((v) => v !== '').sort().join('|');
+      if (oldVals !== '' && newVals !== '' && oldVals !== newVals) {
         errors.push({
           errorType: 'VALUE_MISMATCH',
           oldColumn: m.old,
           newColumn: m.new,
-          oldValue: oldTotal,
-          newValue: newTotal,
+          oldValue: oldVals,
+          newValue: newVals,
           groupKey,
-          message: `[MULTIPLE] Group sum mismatch [${m.old}→${m.new}]: ${oldTotal} ≠ ${newTotal} (group: ${groupKey})`,
+          message: `[MULTIPLE] Distinct-set mismatch [${m.old}→${m.new}]: {${oldVals}} ≠ {${newVals}} (group: ${groupKey})`,
         });
       }
     }
@@ -1193,6 +1202,35 @@ export class MultipleStrategy extends BaseStrategy {
           newValue: newTotal,
           groupKey,
           message: `[MULTIPLE] Group formula mismatch [${m.formula}(${m.old_cols.join(',')})→${m.new}]: ${oldComputed} ≠ ${newTotal} (group: ${groupKey})`,
+        });
+      }
+    }
+
+    for (const m of mappings.filtered_sum_matches ?? []) {
+      if (this.isNoisyType(noisyMap.get(m.old))) continue;
+      const f = m.old_filter;
+      const filteredOld = oldGroup.filter((row) => {
+        if (f.affectcode_in?.length && !f.affectcode_in.includes(String(row['affectcode'] ?? ''))) return false;
+        if (f.debitcredit && String(row['debitcredit'] ?? '') !== f.debitcredit) return false;
+        if (f.loantranshostcode_not_in?.includes(String(row['loantranshostcode'] ?? ''))) return false;
+        if (f.loantranshostcode_in?.length && !f.loantranshostcode_in.includes(String(row['loantranshostcode'] ?? ''))) return false;
+        return true;
+      });
+      const oldSum = this.sumColumn(filteredOld, m.old) ?? 0;
+      const newTotal = this.sumColumn(newGroup, m.new) ?? 0;
+      if (Math.abs(oldSum - newTotal) > tolerance) {
+        const filterDesc = [
+          f.affectcode_in?.length ? `affectcode∈[${f.affectcode_in.join(',')}]` : '',
+          f.debitcredit ? `dc=${f.debitcredit}` : '',
+        ].filter(Boolean).join(',');
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: `${m.old}[${filterDesc}]`,
+          newColumn: m.new,
+          oldValue: oldSum,
+          newValue: newTotal,
+          groupKey,
+          message: `[MULTIPLE] Filtered sum mismatch [${m.old}(${filterDesc})→${m.new}]: ${oldSum} ≠ ${newTotal} (group: ${groupKey})`,
         });
       }
     }
