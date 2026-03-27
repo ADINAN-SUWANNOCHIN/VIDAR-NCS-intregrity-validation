@@ -58,8 +58,11 @@ schema_mappings:
     - old: systemreferencenumber
       new: orderno
 
-    - old: affectcode
-      new: affectcode
+    # NOTE: affectcode EXCLUDED from exact_matches — the N:M H-table structure means old has
+    # multiple rows with {PP, I1, QQ} but H rows carry different affectcodes per ledger entry.
+    # Distinct-set comparison produces false VALUE_MISMATCH on every group.
+    # Affectcode routing correctness is fully validated by def001 steps 1-5 (amount per affectcode
+    # lands in the correct lv* column). No separate affectcode column check needed.
 
     - old: chargetype
       new: chargetype
@@ -122,17 +125,11 @@ schema_mappings:
     # NOTE: laformatt9adjustpp is in old but NOT found in H columns — excluded
 
   transformed_matches:
-    - old: eirrate
-      new: eirrate
-      transform_rule: NONE
-
-    - old: calculateintrate
-      new: calculateintrate
-      transform_rule: NONE
-
-    - old: calprovisionamount
-      new: calprovisionamount
-      transform_rule: NONE
+    # NOTE: eirrate, calculateintrate, calprovisionamount are EXCLUDED from transformed_matches.
+    # These are constant-per-group values (account-level rate/provision, same for all rows
+    # in a sysref group). sumColumn gives N×value vs M×value when old and H row counts differ
+    # (e.g. 4 old rows × 0.04 = 0.16 ≠ 3 H rows × 0.04 = 0.12 → false VALUE_MISMATCH).
+    # Validated via COUNT-normalized AVG comparison in def001 steps 7-9.
 
     - old: transactiondate
       new: transactiondate
