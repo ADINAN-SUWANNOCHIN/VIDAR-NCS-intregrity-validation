@@ -95,7 +95,7 @@ export class ValidationService {
 
       // ---- โหลด def rules + vali rules ----
       const defRules = [
-        ...this.ruleLoader.loadValiRules(tableName, rulePath),
+        ...this.ruleLoader.loadValiRules(tableName, tableConfig.vali_list, rulePath),
         ...this.ruleLoader.loadDefRules(tableName, tableConfig.def_list, rulePath),
       ];
 
@@ -127,11 +127,13 @@ export class ValidationService {
       // true total: use strategy-reported count (accounts for capped errors) + sum check errors
       const trueTotal = (strategyTotalErrors ?? errors.length - sumErrors.length) + sumErrors.length;
 
-      // Pre-extract remarks from structural errors before clearing the array
+      // Pre-extract remarks and breakdown before clearing the errors array
       const remarks = errors
         .filter((e) => ['COLUMN_MISSING', 'DATA_MISSING', 'TRANSFORM_ERROR'].includes(e.errorType))
         .map((e) => e.message)
         .join(' | ');
+
+      const breakdown = this.reportService.computeBreakdown(errors);
 
       const tableResult: TableResult = {
         tableName,
@@ -146,6 +148,7 @@ export class ValidationService {
         timeSpent: Date.now() - start,
         errors,
         remarks,
+        breakdown,
       };
 
       // Flush errors to detail log, then clear from memory (GC eligible)

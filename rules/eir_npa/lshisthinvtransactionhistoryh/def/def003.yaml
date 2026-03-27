@@ -1,0 +1,88 @@
+# ============================================================
+# def003 — H-row Interest Processing Order Defect
+# Scope: eir_npa / lshisthinvtransactionhistoryh
+#
+# Background:
+#   Each payment group (sysref) produces H-rows in ls$lshisthinvtransactionhistoryh,
+#   ordered by [lineno]:
+#     lineno=0: I1/C row and I1/D row (interest credit/debit)
+#     lineno=2: QQ+PP row (main payment — transactionamount + lvcreditprincipleamount)
+#
+#   The QQ+PP row always carries runninglvinterestbalance = interestb4t (snapshot).
+#   The I1 rows carry a running accumulation starting from interestb4t.
+#
+# Correct processing order (accounting requirement):
+#   1. I1/D — recognize interest owed   → running = interestb4t + I1D
+#   2. I1/C — receive interest payment  → running = interestb4t + I1D − I1C  (≥ 0)
+#   3. QQ+PP — collect total payment    → running = interestb4t (snapshot)
+#
+# Migration defect:
+#   I1/C rows are assigned a smaller id than I1/D within lineno=0.
+#   NCS processes lineno=0 rows in id order → I1/C is processed first (wrong).
+#
+# Detection (formula derivation):
+#   For any N H-rows in a group, SUM(runninglvinterestbalance) equals:
+#
+#     Correct order: N·interestb4t + 2·I1D − I1C
+#     Wrong order:   N·interestb4t + I1D − 2·I1C
+#     Difference:    I1D + I1C  (always > 0)
+#
+#   Since SUM(new.interestb4t) = N·interestb4t, the check becomes:
+#     SUM(running) + I1C == SUM(new.interestb4t) + 2·I1D
+#
+#   This detects ALL wrong-ordering groups — not just those where the running
+#   balance visibly dips negative (which requires I1C > interestb4t).
+#
+# Guard:
+#   When i1_credit = 0 (I1/D-only groups — 222,124 groups), the formula does not
+#   apply (no ordering possible with a single I1 type). The guard short-circuits.
+#
+# Scale (confirmed via live DB, 2026-03-27):
+#   Groups with both I1/D and I1/C (formula scope):  149,238
+#   Groups with I1/D only (guarded, formula skipped): 222,124
+#   Groups with negative running (FIELD_VALUE_CHECK): 144,308 (subset of 149,238)
+#   This formula catches all 149,238 — ~5K more than the sign-based check alone.
+#
+# Example (ITEM6303000742, interestb4t=0, I1D=I1C=693.58):
+#   WRONG:  SUM(running)=−693.58; LHS=0, RHS=1387.16 → diff=−1387.16 → FAIL
+#   CORRECT: SUM(running)=+693.58; LHS=1387.16, RHS=1387.16 → diff=0 → PASS
+#
+# Example (ITEM6306003190, interestb4t=507.64, I1D=136.36, I1C=644):
+#   WRONG:  SUM(running)=371.28; LHS=1015.28, RHS=1795.64 → diff=−780.36 → FAIL
+#   CORRECT: SUM(running)=1151.64; LHS=1795.64, RHS=1795.64 → diff=0 → PASS
+# ============================================================
+
+def_id: def003
+target_scope: transaction_group
+
+trigger_condition:
+  must_have_any: [I1]
+
+actions:
+  # -------------------------------------------------------
+  # Step 1: Interest processing order — formula check
+  #
+  # Derives the expected SUM(runninglvinterestbalance) for
+  # the correct I1/D-before-I1/C ordering and compares to
+  # the actual sum. Any ordering defect shifts the sum by
+  # exactly -(I1D + I1C), which this check detects.
+  #
+  # Condition (boolean path — no == to avoid split):
+  #   Guard: skip when i1_credit = 0 (I1/D-only group, no ordering issue)
+  #   Formula: |sum_running_int + i1_credit − sum_ib4t − 2·i1_debit| ≤ 0.01
+  # -------------------------------------------------------
+  - step: "1"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      sum_running_int: "SUM(new.runninglvinterestbalance)"
+      sum_ib4t:        "SUM(new.interestb4t)"
+      i1_debit:        "SUM(old.transactionamount[affectcode=I1][debitcredit=D])"
+      i1_credit:       "SUM(old.transactionamount[affectcode=I1][debitcredit=C])"
+    condition: "i1_credit <= 0 || (Math.abs(sum_running_int + i1_credit - sum_ib4t - 2 * i1_debit) <= 0.01)"
+    error_message: >
+      H-table interest rows are in wrong processing order: I1/C (credit) applied before I1/D (debit).
+      Expected (correct order): SUM(running) + I1C == SUM(interestb4t) + 2*I1D.
+      sum_running_int={sum_running_int}, i1_credit={i1_credit}, sum_ib4t={sum_ib4t}, i1_debit={i1_debit}.
+      Actual LHS={sum_running_int}+{i1_credit}, Expected RHS={sum_ib4t}+2*{i1_debit}.
+      Root cause: I1/C row has smaller id than I1/D within lineno=0 — NCS processes it first.
+      Correct order: I1/D (accrual) → I1/C (receipt) → QQ+PP (principal payment).
