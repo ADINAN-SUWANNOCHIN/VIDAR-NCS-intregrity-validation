@@ -46,6 +46,28 @@ class RunPresetDto {
   @IsArray()
   @IsString({ each: true })
   def_list?: string[];
+
+  /**
+   * Shorthand filter — comma-separated rule IDs, auto-routed by prefix.
+   * e.g. "def001,vali001,vali002"  →  def_list: ["def001"], vali_list: ["vali001","vali002"]
+   * Items starting with "vali" → vali_list; "def" → def_list.
+   * Takes precedence over def_list / vali_list when both are provided.
+   */
+  @IsOptional()
+  @IsString()
+  rules?: string;
+}
+
+/** Parse a comma-separated rules string into separate vali/def ID lists. */
+function parseRulesFilter(rules: string | undefined): { valiList: string[] | undefined; defList: string[] | undefined } {
+  if (!rules || rules.trim() === '') return { valiList: undefined, defList: undefined };
+  const ids = rules.split(',').map((s) => s.trim()).filter(Boolean);
+  const valiList = ids.filter((id) => id.toLowerCase().startsWith('vali'));
+  const defList  = ids.filter((id) => id.toLowerCase().startsWith('def'));
+  return {
+    valiList: valiList.length > 0 ? valiList : undefined,
+    defList:  defList.length  > 0 ? defList  : undefined,
+  };
 }
 
 @Controller('validation')
@@ -225,12 +247,10 @@ export class ValidationController {
 
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? 'ALL_MODULES',
-      tables: entries.map((e) => ({
-        table_name: e.table_name,
-        rule_path: e.rule_path,
-        vali_list: body.vali_list,
-        def_list: body.def_list,
-      })),
+      tables: entries.map((e) => {
+        const { valiList, defList } = body.rules ? parseRulesFilter(body.rules) : { valiList: body.vali_list, defList: body.def_list };
+        return { table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList };
+      }),
     };
 
     const jobId = await this.validationService.startJob(dto);
@@ -273,12 +293,10 @@ export class ValidationController {
 
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? `${module.toUpperCase()}_ALL`,
-      tables: entries.map((e) => ({
-        table_name: e.table_name,
-        rule_path: e.rule_path,
-        vali_list: body.vali_list,
-        def_list: body.def_list,
-      })),
+      tables: entries.map((e) => {
+        const { valiList, defList } = body.rules ? parseRulesFilter(body.rules) : { valiList: body.vali_list, defList: body.def_list };
+        return { table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList };
+      }),
     };
 
     const jobId = await this.validationService.startJob(dto);
@@ -339,12 +357,10 @@ export class ValidationController {
 
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? `${module.toUpperCase()}_${category.toUpperCase()}`,
-      tables: entries.map((e) => ({
-        table_name: e.table_name,
-        rule_path: e.rule_path,
-        vali_list: body.vali_list,  // undefined = run all; [] = skip all vali
-        def_list: body.def_list,    // undefined = run all; [] = skip all def
-      })),
+      tables: entries.map((e) => {
+        const { valiList, defList } = body.rules ? parseRulesFilter(body.rules) : { valiList: body.vali_list, defList: body.def_list };
+        return { table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList };
+      }),
     };
 
     const jobId = await this.validationService.startJob(dto);
