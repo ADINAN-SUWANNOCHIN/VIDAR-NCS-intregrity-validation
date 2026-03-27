@@ -12,7 +12,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { IsArray, IsOptional, IsString } from 'class-validator';
-import { ApiPropertyOptional, ApiQuery } from '@nestjs/swagger';
+import { ApiQuery } from '@nestjs/swagger';
 import * as express from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -25,29 +25,24 @@ import { ValidationRequestDto } from '../dto/validation-request.dto';
 import { JobRecord } from '../job/job.types';
 
 class RunPresetDto {
-  @ApiPropertyOptional({ description: 'Label for this job', example: 'NPA_Full_Run' })
   @IsOptional()
   @IsString()
   job_name?: string;
 
-  @ApiPropertyOptional({ description: 'Run only this case (omit = all cases)', example: 'lahisthloantransactionhistoryh' })
   @IsOptional()
   @IsString()
   case_name?: string;
 
-  @ApiPropertyOptional({ description: 'Run only these source tables (omit = all)', type: [String], example: ['conv$vinpainvcithistoryh'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   sources?: string[];
 
-  @ApiPropertyOptional({ description: 'Vali rule IDs to run (omit = all, [] = skip all)', type: [String], example: ['vali001'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   vali_list?: string[];
 
-  @ApiPropertyOptional({ description: 'Def rule IDs to run (omit = all, [] = skip all)', type: [String], example: ['def001'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
@@ -55,8 +50,7 @@ class RunPresetDto {
 }
 
 /** Parse a comma-separated rules string into separate vali/def ID lists. */
-function parseRulesFilter(rules: string | undefined): { valiList: string[] | undefined; defList: string[] | undefined } {
-  if (!rules || rules.trim() === '') return { valiList: undefined, defList: undefined };
+function parseRulesFilter(rules: string): { valiList: string[] | undefined; defList: string[] | undefined } {
   const ids = rules.split(',').map((s) => s.trim()).filter(Boolean);
   const valiList = ids.filter((id) => id.toLowerCase().startsWith('vali'));
   const defList  = ids.filter((id) => id.toLowerCase().startsWith('def'));
@@ -230,10 +224,8 @@ export class ValidationController {
    */
   @Post('run/all')
   @HttpCode(HttpStatus.ACCEPTED)
-  @ApiQuery({ name: 'rules', required: false, description: 'Comma-separated rule IDs (e.g. def001,vali001). vali* → vali_list, def* → def_list.', example: 'def001,vali001' })
   async runAll(
     @Body() body: RunPresetDto,
-    @Query('rules') rules?: string,
   ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
     const entries = this.presetService.resolveAllTables();
 
@@ -243,10 +235,14 @@ export class ValidationController {
       );
     }
 
-    const { valiList, defList } = rules ? parseRulesFilter(rules) : { valiList: body.vali_list, defList: body.def_list };
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? 'ALL_MODULES',
-      tables: entries.map((e) => ({ table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList })),
+      tables: entries.map((e) => ({
+        table_name: e.table_name,
+        rule_path: e.rule_path,
+        vali_list: body.vali_list,
+        def_list: body.def_list,
+      })),
     };
 
     const jobId = await this.validationService.startJob(dto);
@@ -275,11 +271,9 @@ export class ValidationController {
    */
   @Post('run/preset/:module')
   @HttpCode(HttpStatus.ACCEPTED)
-  @ApiQuery({ name: 'rules', required: false, description: 'Comma-separated rule IDs (e.g. def001,vali001). vali* → vali_list, def* → def_list.', example: 'def001,vali001' })
   async runPresetModule(
     @Param('module') module: string,
     @Body() body: RunPresetDto,
-    @Query('rules') rules?: string,
   ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
     const entries = this.presetService.resolveTablesForModule(module);
 
@@ -289,10 +283,14 @@ export class ValidationController {
       );
     }
 
-    const { valiList, defList } = rules ? parseRulesFilter(rules) : { valiList: body.vali_list, defList: body.def_list };
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? `${module.toUpperCase()}_ALL`,
-      tables: entries.map((e) => ({ table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList })),
+      tables: entries.map((e) => ({
+        table_name: e.table_name,
+        rule_path: e.rule_path,
+        vali_list: body.vali_list,
+        def_list: body.def_list,
+      })),
     };
 
     const jobId = await this.validationService.startJob(dto);
@@ -310,17 +308,24 @@ export class ValidationController {
    * POST /validation/run/preset/:module/:category
    * Run all or a filtered subset of tables from a preset.
    *
+   * Optional query:
+   *   ?rules=def001,vali001   — comma-separated rule IDs; vali* → vali rules, def* → def rules
+   *
    * Optional body filters:
    * {
-   *   "job_name":  "My_Run",                     — label for this job
+   *   "job_name":  "My_Run",                        — label for this job
    *   "case_name": "lahisthloantransactionhistoryh", — run only this case (omit = all cases)
-   *   "sources":   ["conv$vinpainvcithistoryh"],  — run only these source tables (omit = all)
-   *   "def_list":  ["def001"]                    — apply def rules to all selected tables
+   *   "sources":   ["conv$vinpainvcithistoryh"],     — run only these source tables (omit = all)
+   *   "vali_list": ["vali001"],                      — run only these vali rules (omit = all)
+   *   "def_list":  ["def001"]                        — run only these def rules (omit = all)
    * }
    *
    * Examples:
    *   POST /validation/run/preset/npa/rights
    *     → runs ALL cases, ALL source tables
+   *
+   *   POST /validation/run/preset/npa/rights?rules=def001,vali001
+   *     → runs all tables, only def001 + vali001
    *
    *   POST /validation/run/preset/npa/rights  { "case_name": "lahisthloantransactionhistoryh" }
    *     → runs all 5 source tables for Case 2 only
@@ -330,12 +335,12 @@ export class ValidationController {
    */
   @Post('run/preset/:module/:category')
   @HttpCode(HttpStatus.ACCEPTED)
-  @ApiQuery({ name: 'rules', required: false, description: 'Comma-separated rule IDs (e.g. def001,vali001). vali* → vali_list, def* → def_list.', example: 'def001,vali001' })
+  @ApiQuery({ name: 'rules', required: false, description: 'Comma-separated rule IDs — vali* goes to vali rules, def* to def rules. e.g. def001,vali001', example: 'def001,vali001' })
   async runPreset(
     @Param('module') module: string,
     @Param('category') category: string,
+    @Query('rules') rules: string | undefined,
     @Body() body: RunPresetDto,
-    @Query('rules') rules?: string,
   ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
     const entries = this.presetService.resolveTablesForRun(
       module,
@@ -353,10 +358,18 @@ export class ValidationController {
       );
     }
 
-    const { valiList, defList } = rules ? parseRulesFilter(rules) : { valiList: body.vali_list, defList: body.def_list };
+    const { valiList, defList } = rules
+      ? parseRulesFilter(rules)
+      : { valiList: body.vali_list, defList: body.def_list };
+
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? `${module.toUpperCase()}_${category.toUpperCase()}`,
-      tables: entries.map((e) => ({ table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList })),
+      tables: entries.map((e) => ({
+        table_name: e.table_name,
+        rule_path: e.rule_path,
+        vali_list: valiList,  // undefined = run all; [] = skip all vali
+        def_list: defList,    // undefined = run all; [] = skip all def
+      })),
     };
 
     const jobId = await this.validationService.startJob(dto);
