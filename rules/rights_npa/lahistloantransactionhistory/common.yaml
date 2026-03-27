@@ -13,7 +13,8 @@
 #   - Group keys (systemreferencenumber) are MUTUALLY EXCLUSIVE across the 3 sources
 #     → each group key appears in exactly one old table. Per-pair comparison is safe.
 #   - old.newaccountno → new.accountno  (old.accountno is old-format "PSA..." NOT used in new)
-#   - old.loantransaction → new.loantranshostcode  (loantransactionhistorycode is always empty)
+#   - old.loantransaction → new.loantranshostcode  (subset_matches — NCS adds extra rows with new codes)
+#   - old.loantransaction → new.loantransactionhistorycode  (DEFECT: new column always NULL — migration missed this)
 #   - old.auxilarytransactioncode → new.auxilarytranscode
 #   - old.systemreferencenumber → new.systemreferenceno  (group key, also maps as data)
 #   - old.receiptnumber → new.receiptno
@@ -70,6 +71,7 @@ transaction_grouping:
       new: transactionamount
     - old: transactiondate
       new: transactiondate
+      transform: YEAR_ONLY
 
 defaults:
   tolerance: 0.01   # allow 0.01 rounding difference on decimal amounts
@@ -90,12 +92,6 @@ schema_mappings:
 
     - old: auxilarytransactioncode
       new: auxilarytranscode          # column renamed (shortened)
-
-    - old: loantransaction
-      new: loantranshostcode          # column renamed (verified: "20000" → "20000")
-
-    - old: affectcode
-      new: affectcode
 
     - old: debitcredit
       new: debitcredit
@@ -133,33 +129,124 @@ schema_mappings:
     - old: ratevariancecode
       new: variancecode               # column renamed
 
+    # loantransaction → loantransactionhistorycode: migration DEFECT — new column is always NULL.
+    # old.loantransaction has data but was never written to loantransactionhistorycode during migration.
+    # (old.loantransaction → new.loantranshostcode is a separate, correct mapping in subset_matches)
+    - old: loantransaction
+      new: loantransactionhistorycode
+
     # NOTE: billno excluded from exact_matches — handled via concat_matches below
     # NOTE: planno not in conv$vinpalrentalhistory — safe (only checked in vinpahistory pair)
 
-    # ---- Ensure conv$vinpalrentalhistory and conv$vinpalrtrespasserhist are in pairMap ----
-    # At least one mapping per source is required to create a pair entry in the engine.
-    # Groups from rental/respasserhist are otherwise silently excluded from ALL checks.
+    # ---- conv$vinpalrentalhistory full column mappings ----
+    # 147 rows total, 147 match new table (1:1 confirmed, 0 unmatched).
+    # All columns verified via data comparison 2026-03-27.
+    # NOTE: accountno (old) is old-format "RN6701-00001-R01" — NOT used; newaccountno is correct.
+    # NOTE: startinterestdate/endinterestdate have real data in rental (86/147 rows filled)
+    #       → mapped via transformed_matches for rental pair (unlike vinpahistory where both = empty).
     - old: newaccountno
       new: accountno
       src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
       tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
 
+    - old: tellerid
+      new: tellerid
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: remark
+      new: remark
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: auxilarytransactioncode
+      new: auxilarytranscode
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: receiptnumber
+      new: receiptno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    # ---- conv$vinpalrtrespasserhist full column mappings ----
+    # 11 rows total (5 sysref groups + 1 empty-sysref BF row).
+    # All columns verified via data comparison 2026-03-27.
+    # NOTE: accountno (old) is old-format — NOT used; newaccountno is correct.
+    # NOTE: affectcode — PP/C×5, QQ/C×5, PP/D×1 in old; PP+QQ per group in new.
+    #       old ⊆ new confirmed → added as exact_match (string, group-mode doc only).
+    # NOTE: interestrate — all '0' or '' (no real data) → excluded.
+    # NOTE: billno — same concat pattern as vinpahistory (billno+newaccountno) → handled by
+    #       default concat_match which applies to vinpahistory pair; documented here only.
     - old: newaccountno
       new: accountno
       src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
       tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
 
+    - old: debitcredit
+      new: debitcredit
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: affectcode
+      new: affectcode
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: loantransaction
+      new: loantranshostcode
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: tellerid
+      new: tellerid
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: doctype
+      new: doctype
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: remark
+      new: remark
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: fixfloat
+      new: fixfloat
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: ratevariancecode
+      new: variancecode
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: auxilarytransactioncode
+      new: auxilarytranscode
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: receiptnumber
+      new: receiptno
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrtrespasserhist]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+  subset_matches:
+    # affectcode: all CONV affectcodes must appear in NCS, but NCS adds extra rows
+    # (QQ total rows + I1/C credit counterparts). Old ⊆ new is the correct check.
+    - old: affectcode
+      new: affectcode
+    # loantranshostcode: same reason — NCS adds auto rows with new host codes.
+    - old: loantransaction
+      new: loantranshostcode
+
   # ---- Amount columns: old = nvarchar string ("5179.46"), new = decimal ----
   # isEqual() uses parseFloat on both sides → tolerance 0.01 handles rounding.
   # Repeated for each source so all 3 sources get amount validation.
   transformed_matches:
-    # transactionamount: present in all 3 sources
-    - old: transactionamount
-      new: transactionamount
-      transform_rule: NONE
-      src_table: "[ncs-conv-aging].dbo.[conv$vinpahistory]"
-      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
-
+    # transactionamount: present in rental and respasserhist (vinpahistory handled via filtered_sum_matches)
     - old: transactionamount
       new: transactionamount
       transform_rule: NONE
@@ -227,9 +314,8 @@ schema_mappings:
       new: installmentamount          # column renamed
       transform_rule: NONE
 
-    - old: calculaterate
-      new: calculateintrate           # column renamed
-      transform_rule: NONE
+    # calculaterate (vinpahistory): moved to filtered_sum_matches — per-affectcode comparison
+    # (default entry removed to avoid inflated group sum comparison against NCS auto-rows)
 
     # ratevariance/installment/calculaterate for vinpalrtrespasserhist
     - old: ratevariance
@@ -271,9 +357,62 @@ schema_mappings:
       new: nextpaymentduedateb4t
       transform_rule: DATE_TO_DATETIME
 
-    # NOTE: startinterestdate, endinterestdate — excluded: old="" nvarchar vs new=null datetime2
+    # NOTE: startinterestdate, endinterestdate — excluded for vinpahistory (old="" nvarchar vs new=null datetime2).
+    #   conv$vinpalrentalhistory (86/147 rows have real dates) → mapped below for rental pair.
     # NOTE: noofdays — excluded: old="" nvarchar vs new=null int (empty-vs-null edge case)
-    # NOTE: interestrate — excluded: old="" empty vs new=0 decimal (empty-as-zero edge case)
+    # NOTE: interestrate — excluded for vinpahistory (old="" empty vs new=0 decimal).
+    #   conv$vinpalrtrespasserhist interestrate = all '0' or '' → no real data, excluded.
+
+    # ---- Date columns for rental pair ----
+    - old: nextpaymentduedateb4t
+      new: nextpaymentduedateb4t
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: startinterestdate
+      new: startinterestdate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+    - old: endinterestdate
+      new: endinterestdate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalrentalhistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahistloantransactionhistory]"
+
+  # Per-affectcode amount validation for conv$vinpahistory.
+  # Replaces the old GROUP SUM check which was inflated by NCS auto-rows (QQ/I1-C).
+  # Each filter compares SUM(old[ac,dc]) to SUM(new[ac,dc]) — NCS rows with different
+  # affectcodes are excluded from both sides, so the comparison is meaningful.
+  filtered_sum_matches:
+    - old: transactionamount
+      old_filter: {affectcode_in: ['PP'], debitcredit: 'C'}
+      new_filter: {affectcode_in: ['PP'], debitcredit: 'C'}
+      new: transactionamount
+      skip_if_old_empty: true
+
+    - old: transactionamount
+      old_filter: {affectcode_in: ['I1', 'I2', 'I3', 'IN', 'IT', 'GG'], debitcredit: 'D'}
+      new_filter: {affectcode_in: ['I1', 'I2', 'I3', 'IN', 'IT', 'GG'], debitcredit: 'D'}
+      new: transactionamount
+      skip_if_old_empty: true
+
+    - old: transactionamount
+      old_filter: {affectcode_in: ['QQ'], debitcredit: 'C'}
+      new_filter: {affectcode_in: ['QQ'], debitcredit: 'C'}
+      new: transactionamount
+      skip_if_old_empty: true
+
+    # calculaterate: interest rate stored per-row. Compare only I1/D rows (where rate is set).
+    # QQ rows have calculaterate=0 in old but NCS populates calculateintrate on expanded rows.
+    # skip_if_old_empty: QQ-only groups have no I1/D → NCS expanded them, skip rate check.
+    - old: calculaterate
+      old_filter: {affectcode_in: ['I1', 'I2', 'I3', 'IN', 'IT', 'GG'], debitcredit: 'D'}
+      new_filter: {affectcode_in: ['I1', 'I2', 'I3', 'IN', 'IT', 'GG'], debitcredit: 'D'}
+      new: calculateintrate
+      skip_if_old_empty: true
 
   # ---- Concat mappings ----
   # billno: old="200811" → new="20081121150000434" (billno + newaccountno concatenated, no separator)

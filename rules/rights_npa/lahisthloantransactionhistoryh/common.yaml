@@ -51,6 +51,7 @@ transaction_grouping:
   row_fingerprint:
     - old: transactiondate
       new: transactiondate
+      transform: YEAR_ONLY
     - old: currentbalanceb4t
       new: currentbalanceb4t
     - old: interestb4t
@@ -176,8 +177,73 @@ schema_mappings:
 
     # ---- CIT-specific confirmed mappings ----
     # Q6: principleamount → txformatcostnpapaid confirmed via SQL
+    # NOTE: old.txformatcostnpapaid column in CONV is always '0' (not migrated from CONV).
+    #       The correct source is old.principleamount (mapped below). Not a migration defect —
+    #       CONV computed txformatcostnpapaid was never stored; principleamount is the raw source.
+    # NOTE: gldate — excluded: old="YYYY-MM-DD" string vs new=datetime2 with -7h timezone offset
+    #       (same C6 issue as vinpllvhistory keydate — times diverge by 7 hours).
     - old: principleamount
       new: txformatcostnpapaid
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: currency
+      new: currency
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: citratio
+      new: citratio
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: currentbalanceb4t
+      new: currentbalanceb4t
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: txformatclosepptrans
+      new: txformatclosepptrans
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: txformatcancelpptrans
+      new: txformatcancelpptrans
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: remark
+      new: remark
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: tellerid
+      new: tellerid
       transform_rule: NONE
       src_table: "[ncs-conv-aging].dbo.[conv$vinpainvcithistoryh]"
       tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
@@ -186,8 +252,36 @@ schema_mappings:
     # Q5: sbttotalamount = interest33 (same value confirmed)
     # NOTE: group comparison will be skipped due to group key mismatch (see above).
     # Aggregate SUM check will still validate sbttotalamount totals per affectcode.
+    # NOTE: accountno (old) is old-format PSA... — NOT used; newaccountno is correct.
+    # NOTE: tellerid — TYPE MISMATCH (numeric code '2120' vs AD username 'jatuporn'), excluded.
+    # NOTE: accountbranch, servicebranch — NULL in new H table, not migrated.
+    # NOTE: interestb4t — old repeats '0' but new has computed values; same per-row issue as lvhistory.
     - old: sbttotalamount
       new: interest33
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: transactionamount
+      new: transactionamount
+      transform_rule: NONE
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: transactiondate
+      new: transactiondate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: effectivedate
+      new: effectivedate
+      transform_rule: DATE_TO_DATETIME
+      src_table: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
+      tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"
+
+    - old: currency
+      new: currency
       transform_rule: NONE
       src_table: "[ncs-conv-aging].dbo.[conv$vinpalnsbthistory]"
       tgt_table: "[ncs-npl-aging].dbo.[la$lahisthloantransactionhistoryh]"

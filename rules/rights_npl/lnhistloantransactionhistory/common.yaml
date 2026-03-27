@@ -53,7 +53,10 @@ schema_mappings:
     # --- TRANSACTION CODES ---
     - old: loantransactioncode
       new: loantranshostcode
-    # PLACEHOLDER: loantransactionhistorycode (new-only, always empty in sample — no old source)
+    # MIGRATION DEFECT: loantransactionhistorycode — ALL NULL in new (13,480,117 / 13,480,117 rows).
+    #   Same defect as rights_npa: old.loantransactioncode was never written to new.loantransactionhistorycode
+    #   during migration. The column exists in new but was never populated.
+    #   old.loantransactioncode → new.loantranshostcode is the correct (working) mapping above.
 
     - old: auxilarytransaction
       new: auxilarytranscode
@@ -248,6 +251,12 @@ schema_mappings:
 
     - old: installment
       new: installmentamount
+      transform_rule: NONE
+
+    # noofdays: old=nvarchar (often empty), new=int. Verified match on filled rows (3M+ rows with data).
+    # skip_if_old_empty not needed — sumColumn on nvarchar '1' → parseFloat → 1; empty→NaN→skipped.
+    - old: noofdays
+      new: noofdays
       transform_rule: NONE
 
     # Date columns: old = ISO string "2024-01-01T00:00:00.000+07:00", new = datetime2

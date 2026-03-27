@@ -64,10 +64,11 @@ actions:
     variables:
       val_i1_credit: "SUM(old.transactionamount[affectcode=I1][debitcredit=C])"
       val_credit_interest: "SUM(new.creditinterestamount)"
-    condition: "val_i1_credit == val_credit_interest"
+    condition: "val_i1_credit == 0 OR val_i1_credit == val_credit_interest"
     error_message: >
       I1/C not correctly pivoted to creditinterestamount.
       old.transactionamount[I1/C]={val_i1_credit}, new.creditinterestamount={val_credit_interest}.
+      (Only fires when old has an explicit I1/C row — NCS auto-generated I1/C is expected when val_i1_credit=0.)
 
   # -------------------------------------------------------
   # Step 3: I1/D → debitinterestamount
