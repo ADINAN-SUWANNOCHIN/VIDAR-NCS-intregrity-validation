@@ -28,6 +28,11 @@ export interface ExactMatch {
   tgt_table?: string;
 }
 
+export interface SubsetMatch {
+  old: string;
+  new: string;
+}
+
 export interface SplitMatch {
   old: string;
   new_cols: string[];
@@ -94,6 +99,21 @@ export interface FilteredSumMatch {
     loantranshostcode_not_in?: string[];  // consolidate=N exclusion list
     loantranshostcode_in?: string[];      // whitelist: only include rows with these lthc values
   };
+  /**
+   * Optional filter applied to new group rows before summing.
+   * Mirrors old_filter semantics but for the target side.
+   * Use when NCS adds extra rows (e.g. QQ double-entry rows) that inflate SUM(new).
+   */
+  new_filter?: {
+    affectcode_in?: string[];
+    debitcredit?: string;
+  };
+  /**
+   * If true and no old rows match old_filter (filteredOld is empty), skip this check.
+   * Use when old may legitimately have no rows for a given affectcode (e.g. QQ-only groups
+   * have no I1 rows — NCS generates I1 rows from the QQ but old had none to validate against).
+   */
+  skip_if_old_empty?: boolean;
   new: string;                            // target column (e.g. lvcreditprincipleamount)
 }
 
@@ -104,6 +124,7 @@ export interface SchemaMappings {
   concat_matches?: ConcatMatch[];
   formula_matches?: FormulaMatch[];          // multi-col arithmetic → one target col
   filtered_sum_matches?: FilteredSumMatch[]; // filtered group-sum → one target col (lv* columns)
+  subset_matches?: SubsetMatch[];            // old distinct values must be ⊆ new distinct values
   pivot_matches?: PivotMatch[];              // HEADER type only
 }
 
@@ -183,7 +204,7 @@ export interface TransactionGrouping {
    *     - old: transactionamount
    *       new: transactionamount
    */
-  row_fingerprint?: Array<{ old: string; new: string }>;
+  row_fingerprint?: Array<{ old: string; new: string; transform?: 'YEAR_ONLY' }>;
   /**
    * Composite group key — adds a second key component beyond keys.old/keys.new.
    *

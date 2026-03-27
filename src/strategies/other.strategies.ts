@@ -580,6 +580,7 @@ export class MultipleStrategy extends BaseStrategy {
       split: typeof sm.split_matches;
       formula: typeof sm.formula_matches;
       filteredSum: typeof sm.filtered_sum_matches;
+      subset: typeof sm.subset_matches;
     }
 
     const pairMap = new Map<string, PairMappings & MappingPair>();
@@ -587,7 +588,7 @@ export class MultipleStrategy extends BaseStrategy {
     const getOrCreate = (srcTable: string, tgtTable: string) => {
       const key = pairKey({ srcTable, tgtTable });
       if (!pairMap.has(key)) {
-        pairMap.set(key, { srcTable, tgtTable, exact: [], transformed: [], concat: [], split: [], formula: [], filteredSum: [] });
+        pairMap.set(key, { srcTable, tgtTable, exact: [], transformed: [], concat: [], split: [], formula: [], filteredSum: [], subset: [] });
       }
       return pairMap.get(key)!;
     };
@@ -610,6 +611,9 @@ export class MultipleStrategy extends BaseStrategy {
     }
     for (const m of sm.filtered_sum_matches ?? []) {
       getOrCreate(defaultSrc, defaultTgt).filteredSum!.push(m);
+    }
+    for (const m of sm.subset_matches ?? []) {
+      getOrCreate(defaultSrc, defaultTgt).subset!.push(m);
     }
     errors.push(...await this.reportUnmappedColumns(defaultSrc, defaultTgt, sm, 'MULTIPLE'));
 
@@ -646,7 +650,7 @@ export class MultipleStrategy extends BaseStrategy {
       }
 
       for (const pair of pairMap.values()) {
-        const { srcTable, tgtTable, exact, transformed, concat, split, formula, filteredSum } = pair;
+        const { srcTable, tgtTable, exact, transformed, concat, split, formula, filteredSum, subset } = pair;
 
         // Per-source group key: use source_key_aliases if defined for this source,
         // otherwise fall back to tg.keys.old (the shared default).
@@ -731,7 +735,7 @@ export class MultipleStrategy extends BaseStrategy {
                 failCount += oldGroup.length;
                 continue;
               }
-              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
+              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum, subset_matches: subset };
               const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
               const defErrors = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
               pushBulk(...groupErrors);
@@ -762,7 +766,7 @@ export class MultipleStrategy extends BaseStrategy {
               failCount += oldGroup.length;
               continue;
             }
-            const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
+            const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum, subset_matches: subset };
             const flushGe = this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap);
             const flushDe = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
             pushBulk(...flushGe);
@@ -826,7 +830,7 @@ export class MultipleStrategy extends BaseStrategy {
                 });
                 continue;
               }
-              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
+              const pairSm: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum, subset_matches: subset };
               const groupErrors = this.validateGroup(groupKey, oldGroup, newGroup, pairSm, tolerance, noisyMap);
               errors.push(...groupErrors);
               if (groupErrors.length > 0 && tg.row_fingerprint?.length) {
@@ -915,7 +919,7 @@ export class MultipleStrategy extends BaseStrategy {
               failCount += oldGroup.length;
               continue;
             }
-            const pairSmCo: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
+            const pairSmCo: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum, subset_matches: subset };
             const ge = this.validateGroup(groupKey, oldGroup, newGroup, pairSmCo, tolerance, noisyMap);
             errors.push(...ge);
             const de = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
@@ -951,7 +955,7 @@ export class MultipleStrategy extends BaseStrategy {
             failCount += oldGroup.length;
             continue;
           }
-          const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum };
+          const pairSmFlush: SchemaMappings = { exact_matches: exact, transformed_matches: transformed, concat_matches: concat, split_matches: split, formula_matches: formula, filtered_sum_matches: filteredSum, subset_matches: subset };
           const ge = this.validateGroup(groupKey, oldGroup, newGroup, pairSmFlush, tolerance, noisyMap);
           errors.push(...ge);
           const de = this.runDefRules(groupKey, oldGroup, newGroup, ctx.defRules, ctx.affectCodeMap, tolerance);
@@ -1219,8 +1223,19 @@ export class MultipleStrategy extends BaseStrategy {
         if (f.loantranshostcode_in?.length && !f.loantranshostcode_in.includes(String(row['loantranshostcode'] ?? ''))) return false;
         return true;
       });
+      // skip_if_old_empty: if no old rows matched the filter, skip — old had no such affectcode
+      if (m.skip_if_old_empty && filteredOld.length === 0) continue;
       const oldSum = this.sumColumn(filteredOld, m.old) ?? 0;
-      const newTotal = this.sumColumn(newGroup, m.new) ?? 0;
+      // Apply new_filter if specified — excludes NCS-auto rows from target SUM
+      const nf = m.new_filter;
+      const filteredNew = nf
+        ? newGroup.filter((row) => {
+            if (nf.affectcode_in?.length && !nf.affectcode_in.includes(String(row['affectcode'] ?? ''))) return false;
+            if (nf.debitcredit && String(row['debitcredit'] ?? '') !== nf.debitcredit) return false;
+            return true;
+          })
+        : newGroup;
+      const newTotal = this.sumColumn(filteredNew, m.new) ?? 0;
       if (Math.abs(oldSum - newTotal) > tolerance) {
         const filterDesc = [
           f.affectcode_in?.length ? `affectcode∈[${f.affectcode_in.join(',')}]` : '',
@@ -1234,6 +1249,31 @@ export class MultipleStrategy extends BaseStrategy {
           newValue: newTotal,
           groupKey,
           message: `[MULTIPLE] Filtered sum mismatch [${m.old}(${filterDesc})→${m.new}]: ${oldSum} ≠ ${newTotal} (group: ${groupKey})`,
+        });
+      }
+    }
+
+    for (const m of mappings.subset_matches ?? []) {
+      if (this.isNoisyType(noisyMap.get(m.old))) continue;
+      const oldVals = new Set(
+        oldGroup.map((r) => String(r[m.old] ?? '').trim()).filter((v) => v !== ''),
+      );
+      const newVals = new Set(
+        newGroup.map((r) => String(r[m.new] ?? '').trim()).filter((v) => v !== ''),
+      );
+      if (oldVals.size === 0) continue;
+      const missing = [...oldVals].filter((v) => !newVals.has(v));
+      if (missing.length > 0) {
+        const oldStr = [...oldVals].sort().join('|');
+        const newStr = [...newVals].sort().join('|');
+        errors.push({
+          errorType: 'VALUE_MISMATCH',
+          oldColumn: m.old,
+          newColumn: m.new,
+          oldValue: oldStr,
+          newValue: newStr,
+          groupKey,
+          message: `[MULTIPLE] Subset mismatch [${m.old}→${m.new}]: old {${oldStr}} has values not found in new {${newStr}} — missing: {${missing.sort().join('|')}} (group: ${groupKey})`,
         });
       }
     }

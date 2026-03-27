@@ -110,6 +110,9 @@ export abstract class BaseStrategy {
       filtered_sum_matches: (sm.filtered_sum_matches ?? []).filter(
         (m) => !missingOld.has(m.old) && !missingNew.has(m.new),
       ),
+      subset_matches: (sm.subset_matches ?? []).filter(
+        (m) => !missingOld.has(m.old) && !missingNew.has(m.new),
+      ),
       // L3: filter pivot_matches the same way as other mapping types.
       pivot_matches: (sm.pivot_matches ?? []).filter(
         (m) => !missingOld.has(m.value_col) && !missingNew.has(m.new_col),
@@ -655,17 +658,25 @@ export abstract class BaseStrategy {
    * - Numeric string / number → parseFloat (strips trailing zeros)
    * - Other → trim to string
    */
-  protected normalizeFingerprint(v: unknown): string {
-    if (v instanceof Date) return v.toISOString().slice(0, 10);
+  protected normalizeFingerprint(v: unknown, transform?: 'YEAR_ONLY'): string {
+    if (v instanceof Date) {
+      const full = v.toISOString().slice(0, 10);
+      return transform === 'YEAR_ONLY' ? full.slice(0, 4) : full;
+    }
     const s = String(v ?? '').trim();
     // ISO datetime → date only
     const dateMatch = s.match(/^(\d{4}-\d{2}-\d{2})T/);
-    if (dateMatch) return dateMatch[1];
+    if (dateMatch) return transform === 'YEAR_ONLY' ? dateMatch[1].slice(0, 4) : dateMatch[1];
     // JS Date.toString() format: "Mon Aug 09 2021 00:00:00 GMT+0000 ..."
     if (/^[A-Za-z]{3} [A-Za-z]{3} \d{2} \d{4}/.test(s)) {
       const d = new Date(s);
-      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+      if (!isNaN(d.getTime())) {
+        const full = d.toISOString().slice(0, 10);
+        return transform === 'YEAR_ONLY' ? full.slice(0, 4) : full;
+      }
     }
+    // YEAR_ONLY: if value is already a 4-digit year string (e.g. "2009"), return as-is
+    if (transform === 'YEAR_ONLY' && /^\d{4}$/.test(s)) return s;
     const n = parseFloat(s);
     if (!isNaN(n) && s !== '') return String(n);
     return s;
@@ -680,17 +691,17 @@ export abstract class BaseStrategy {
     groupKey: string,
     oldGroup: Record<string, unknown>[],
     newGroup: Record<string, unknown>[],
-    fpCols: Array<{ old: string; new: string }>,
+    fpCols: Array<{ old: string; new: string; transform?: 'YEAR_ONLY' }>,
   ): ValidationError[] {
     const errors: ValidationError[] = [];
 
     const buildMultiset = (
       rows: Record<string, unknown>[],
-      colKey: (c: { old: string; new: string }) => string,
+      colKey: (c: { old: string; new: string; transform?: 'YEAR_ONLY' }) => string,
     ): Map<string, number> => {
       const map = new Map<string, number>();
       for (const row of rows) {
-        const fp = fpCols.map((c) => this.normalizeFingerprint(row[colKey(c)])).join('|');
+        const fp = fpCols.map((c) => this.normalizeFingerprint(row[colKey(c)], c.transform)).join('|');
         map.set(fp, (map.get(fp) ?? 0) + 1);
       }
       return map;
