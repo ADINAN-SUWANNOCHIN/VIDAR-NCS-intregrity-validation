@@ -5,6 +5,13 @@ import * as path from 'path';
 import { ValidationError } from '../rules/rule.types';
 import { PgCacheService } from '../database/pg-cache.service';
 
+export interface BreakdownEntry {
+  errorType: string;   // e.g. VALUE_MISMATCH, ROW_MISSING, DEFECT_VIOLATION
+  defId?: string;      // populated for DEFECT_VIOLATION only (e.g. def001, vali001)
+  count: number;       // number of error occurrences
+  description: string; // first sentence of the error message (truncated)
+}
+
 export interface TableResult {
   tableName: string;
   sourceTable?: string;  // actual DB source table (from common.yaml table_info.source)
@@ -18,6 +25,43 @@ export interface TableResult {
   timeSpent: number;     // ms
   errors: ValidationError[];
   remarks?: string;      // pre-extracted structural error messages for summary (set before errors is cleared)
+  breakdown?: BreakdownEntry[];  // per-type error counts (set before errors is cleared)
+}
+
+/**
+ * Aggregate errors into a compact breakdown before the errors array is cleared.
+ * DEFECT_VIOLATION entries are grouped by defId; all others by errorType only.
+ * Exported as both a standalone function and a service method for flexibility.
+ */
+export function computeBreakdown(errors: ValidationError[]): BreakdownEntry[] {
+  const map = new Map<string, BreakdownEntry>();
+
+  for (const e of errors) {
+    const isDefect = e.errorType === 'DEFECT_VIOLATION' && e.defId;
+    const key = isDefect ? `${e.errorType}::${e.defId}` : e.errorType;
+
+    if (!map.has(key)) {
+      // First occurrence: extract a one-line description from the message
+      const raw = (e.message ?? '').trim();
+      const description = raw.split('\n')[0].replace(/\.\s*$/, '').trim().slice(0, 80);
+      map.set(key, {
+        errorType: e.errorType,
+        defId: isDefect ? e.defId : undefined,
+        count: 0,
+        description,
+      });
+    }
+    map.get(key)!.count++;
+  }
+
+  // Sort: DEFECT_VIOLATION entries first (sorted by defId), then others alphabetically
+  return [...map.values()].sort((a, b) => {
+    if (a.errorType === 'DEFECT_VIOLATION' && b.errorType !== 'DEFECT_VIOLATION') return -1;
+    if (a.errorType !== 'DEFECT_VIOLATION' && b.errorType === 'DEFECT_VIOLATION') return 1;
+    const aKey = (a.defId ?? '') + a.errorType;
+    const bKey = (b.defId ?? '') + b.errorType;
+    return aKey.localeCompare(bKey);
+  });
 }
 
 @Injectable()
@@ -51,6 +95,11 @@ export class ReportService {
   // Incremental write API — used by ValidationService to flush errors
   // per-table so the errors array can be GC'd between tables.
   // ----------------------------------------------------------------
+
+  /** Delegate to standalone computeBreakdown — called by ValidationService before errors are cleared. */
+  computeBreakdown(errors: ValidationError[]): BreakdownEntry[] {
+    return computeBreakdown(errors);
+  }
 
   /** Open the detail log for a job. Call once before processing tables. */
   openDetailLog(jobId: string): { ws: fs.WriteStream; detailPath: string; jobDir: string } {
@@ -172,6 +221,38 @@ export class ReportService {
         (r.timeSpent / 1000).toFixed(2),
         remarks,
       ]));
+    }
+
+    // ---- Error Summary section ----
+    // Aggregate breakdown entries across all tables, merging by (errorType + defId) key.
+    const aggregated = new Map<string, BreakdownEntry>();
+    for (const r of results) {
+      for (const b of (r.breakdown ?? [])) {
+        const key = b.defId ? `${b.errorType}::${b.defId}` : b.errorType;
+        if (!aggregated.has(key)) {
+          aggregated.set(key, { ...b, count: 0 });
+        }
+        aggregated.get(key)!.count += b.count;
+      }
+    }
+
+    if (aggregated.size > 0) {
+      ws.write('\r\n');
+      ws.write(csvRow(['Error Summary']));
+      ws.write(csvRow(['Count', 'Error Type', 'Rule', 'Description']));
+
+      // Sort: DEFECT by defId first, then others alphabetically by errorType
+      const sorted = [...aggregated.values()].sort((a, b) => {
+        if (a.errorType === 'DEFECT_VIOLATION' && b.errorType !== 'DEFECT_VIOLATION') return -1;
+        if (a.errorType !== 'DEFECT_VIOLATION' && b.errorType === 'DEFECT_VIOLATION') return 1;
+        const aKey = (a.defId ?? '') + a.errorType;
+        const bKey = (b.defId ?? '') + b.errorType;
+        return aKey.localeCompare(bKey);
+      });
+
+      for (const b of sorted) {
+        ws.write(csvRow([b.count, b.errorType, b.defId ?? '', b.description]));
+      }
     }
 
     await closeStream(ws);

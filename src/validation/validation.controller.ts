@@ -40,6 +40,11 @@ class RunPresetDto {
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
+  vali_list?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
   def_list?: string[];
 }
 
@@ -223,6 +228,7 @@ export class ValidationController {
       tables: entries.map((e) => ({
         table_name: e.table_name,
         rule_path: e.rule_path,
+        vali_list: body.vali_list,
         def_list: body.def_list,
       })),
     };
@@ -270,6 +276,7 @@ export class ValidationController {
       tables: entries.map((e) => ({
         table_name: e.table_name,
         rule_path: e.rule_path,
+        vali_list: body.vali_list,
         def_list: body.def_list,
       })),
     };
@@ -335,7 +342,8 @@ export class ValidationController {
       tables: entries.map((e) => ({
         table_name: e.table_name,
         rule_path: e.rule_path,
-        def_list: body.def_list,  // undefined = load all; [] would filter out everything
+        vali_list: body.vali_list,  // undefined = run all; [] = skip all vali
+        def_list: body.def_list,    // undefined = run all; [] = skip all def
       })),
     };
 
