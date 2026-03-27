@@ -12,6 +12,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { IsArray, IsOptional, IsString } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import * as express from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -24,35 +25,38 @@ import { ValidationRequestDto } from '../dto/validation-request.dto';
 import { JobRecord } from '../job/job.types';
 
 class RunPresetDto {
+  @ApiPropertyOptional({ description: 'Label for this job', example: 'NPA_Full_Run' })
   @IsOptional()
   @IsString()
   job_name?: string;
 
+  @ApiPropertyOptional({ description: 'Run only this case (omit = all cases)', example: 'lahisthloantransactionhistoryh' })
   @IsOptional()
   @IsString()
   case_name?: string;
 
+  @ApiPropertyOptional({ description: 'Run only these source tables (omit = all)', type: [String], example: ['conv$vinpainvcithistoryh'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   sources?: string[];
 
+  @ApiPropertyOptional({ description: 'Vali rule IDs to run (omit = all, [] = skip all)', type: [String], example: ['vali001'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   vali_list?: string[];
 
+  @ApiPropertyOptional({ description: 'Def rule IDs to run (omit = all, [] = skip all)', type: [String], example: ['def001'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   def_list?: string[];
 
-  /**
-   * Shorthand filter — comma-separated rule IDs, auto-routed by prefix.
-   * e.g. "def001,vali001,vali002"  →  def_list: ["def001"], vali_list: ["vali001","vali002"]
-   * Items starting with "vali" → vali_list; "def" → def_list.
-   * Takes precedence over def_list / vali_list when both are provided.
-   */
+  @ApiPropertyOptional({
+    description: 'Shorthand: comma-separated rule IDs auto-routed by prefix. vali* → vali_list, def* → def_list. Takes precedence over vali_list/def_list.',
+    example: 'def001,vali001,vali002',
+  })
   @IsOptional()
   @IsString()
   rules?: string;
