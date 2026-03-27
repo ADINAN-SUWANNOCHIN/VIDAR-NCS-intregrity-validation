@@ -12,6 +12,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { IsArray, IsOptional, IsString } from 'class-validator';
+import { ApiPropertyOptional, ApiQuery } from '@nestjs/swagger';
 import * as express from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -24,38 +25,33 @@ import { ValidationRequestDto } from '../dto/validation-request.dto';
 import { JobRecord } from '../job/job.types';
 
 class RunPresetDto {
+  @ApiPropertyOptional({ description: 'Label for this job', example: 'NPA_Full_Run' })
   @IsOptional()
   @IsString()
   job_name?: string;
 
+  @ApiPropertyOptional({ description: 'Run only this case (omit = all cases)', example: 'lahisthloantransactionhistoryh' })
   @IsOptional()
   @IsString()
   case_name?: string;
 
+  @ApiPropertyOptional({ description: 'Run only these source tables (omit = all)', type: [String], example: ['conv$vinpainvcithistoryh'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   sources?: string[];
 
+  @ApiPropertyOptional({ description: 'Vali rule IDs to run (omit = all, [] = skip all)', type: [String], example: ['vali001'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   vali_list?: string[];
 
+  @ApiPropertyOptional({ description: 'Def rule IDs to run (omit = all, [] = skip all)', type: [String], example: ['def001'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   def_list?: string[];
-
-  /**
-   * Shorthand filter — comma-separated rule IDs, auto-routed by prefix.
-   * e.g. "def001,vali001,vali002"  →  def_list: ["def001"], vali_list: ["vali001","vali002"]
-   * Items starting with "vali" → vali_list; "def" → def_list.
-   * Takes precedence over def_list / vali_list when both are provided.
-   */
-  @IsOptional()
-  @IsString()
-  rules?: string;
 }
 
 /** Parse a comma-separated rules string into separate vali/def ID lists. */
@@ -234,8 +230,10 @@ export class ValidationController {
    */
   @Post('run/all')
   @HttpCode(HttpStatus.ACCEPTED)
+  @ApiQuery({ name: 'rules', required: false, description: 'Comma-separated rule IDs (e.g. def001,vali001). vali* → vali_list, def* → def_list.', example: 'def001,vali001' })
   async runAll(
     @Body() body: RunPresetDto,
+    @Query('rules') rules?: string,
   ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
     const entries = this.presetService.resolveAllTables();
 
@@ -245,12 +243,10 @@ export class ValidationController {
       );
     }
 
+    const { valiList, defList } = rules ? parseRulesFilter(rules) : { valiList: body.vali_list, defList: body.def_list };
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? 'ALL_MODULES',
-      tables: entries.map((e) => {
-        const { valiList, defList } = body.rules ? parseRulesFilter(body.rules) : { valiList: body.vali_list, defList: body.def_list };
-        return { table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList };
-      }),
+      tables: entries.map((e) => ({ table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList })),
     };
 
     const jobId = await this.validationService.startJob(dto);
@@ -279,9 +275,11 @@ export class ValidationController {
    */
   @Post('run/preset/:module')
   @HttpCode(HttpStatus.ACCEPTED)
+  @ApiQuery({ name: 'rules', required: false, description: 'Comma-separated rule IDs (e.g. def001,vali001). vali* → vali_list, def* → def_list.', example: 'def001,vali001' })
   async runPresetModule(
     @Param('module') module: string,
     @Body() body: RunPresetDto,
+    @Query('rules') rules?: string,
   ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
     const entries = this.presetService.resolveTablesForModule(module);
 
@@ -291,12 +289,10 @@ export class ValidationController {
       );
     }
 
+    const { valiList, defList } = rules ? parseRulesFilter(rules) : { valiList: body.vali_list, defList: body.def_list };
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? `${module.toUpperCase()}_ALL`,
-      tables: entries.map((e) => {
-        const { valiList, defList } = body.rules ? parseRulesFilter(body.rules) : { valiList: body.vali_list, defList: body.def_list };
-        return { table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList };
-      }),
+      tables: entries.map((e) => ({ table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList })),
     };
 
     const jobId = await this.validationService.startJob(dto);
@@ -334,10 +330,12 @@ export class ValidationController {
    */
   @Post('run/preset/:module/:category')
   @HttpCode(HttpStatus.ACCEPTED)
+  @ApiQuery({ name: 'rules', required: false, description: 'Comma-separated rule IDs (e.g. def001,vali001). vali* → vali_list, def* → def_list.', example: 'def001,vali001' })
   async runPreset(
     @Param('module') module: string,
     @Param('category') category: string,
     @Body() body: RunPresetDto,
+    @Query('rules') rules?: string,
   ): Promise<{ jobId: string; queued: number; tables: string[]; message: string }> {
     const entries = this.presetService.resolveTablesForRun(
       module,
@@ -355,12 +353,10 @@ export class ValidationController {
       );
     }
 
+    const { valiList, defList } = rules ? parseRulesFilter(rules) : { valiList: body.vali_list, defList: body.def_list };
     const dto: ValidationRequestDto = {
       job_name: body.job_name ?? `${module.toUpperCase()}_${category.toUpperCase()}`,
-      tables: entries.map((e) => {
-        const { valiList, defList } = body.rules ? parseRulesFilter(body.rules) : { valiList: body.vali_list, defList: body.def_list };
-        return { table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList };
-      }),
+      tables: entries.map((e) => ({ table_name: e.table_name, rule_path: e.rule_path, vali_list: valiList, def_list: defList })),
     };
 
     const jobId = await this.validationService.startJob(dto);
