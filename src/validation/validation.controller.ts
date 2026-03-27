@@ -55,8 +55,8 @@ function parseRulesFilter(rules: string): { valiList: string[] | undefined; defL
   const valiList = ids.filter((id) => id.toLowerCase().startsWith('vali'));
   const defList  = ids.filter((id) => id.toLowerCase().startsWith('def'));
   return {
-    valiList: valiList.length > 0 ? valiList : undefined,
-    defList:  defList.length  > 0 ? defList  : undefined,
+    valiList: valiList.length > 0 ? valiList : [],  // [] = skip all vali; undefined would run all
+    defList:  defList.length  > 0 ? defList  : [],  // [] = skip all def; undefined would run all
   };
 }
 

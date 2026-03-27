@@ -134,3 +134,58 @@ actions:
       H-table interest ledger is unbalanced for this group.
       SUM(lvcreditinterestamount)={val_credit} != SUM(lvdebitinterestamount)={val_debit}.
       Unbalanced double-entry indicates missing or duplicate H row.
+
+  # -------------------------------------------------------
+  # Steps 7-9: Constant-per-group rate and provision fields.
+  #
+  # These are NOT in transformed_matches because sumColumn gives
+  # N×value vs M×value when old and H row counts differ.
+  # Instead, compare averages: SUM/COUNT on each side.
+  # If the value is the same constant in all rows on both sides,
+  # AVG(old) == AVG(new) regardless of how many rows each side has.
+  # -------------------------------------------------------
+
+  # -------------------------------------------------------
+  # Step 7: eirrate — Effective Interest Rate (constant per sysref group)
+  # -------------------------------------------------------
+  - step: "7"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_eirrate_old: "SUM(old.eirrate)"
+      val_eirrate_new: "SUM(new.eirrate)"
+      val_old_n: "COUNT(old)"
+      val_new_n: "COUNT(new)"
+    condition: "val_old_n <= 0 || val_new_n <= 0 || Math.abs(val_eirrate_old / val_old_n - val_eirrate_new / val_new_n) <= 0.0001"
+    error_message: >
+      eirrate mismatch: old avg={val_eirrate_old}/{val_old_n}, new avg={val_eirrate_new}/{val_new_n}.
+      EIR rate was not correctly migrated for this group.
+
+  # -------------------------------------------------------
+  # Step 8: calculateintrate — Calculated interest rate (constant per sysref group)
+  # -------------------------------------------------------
+  - step: "8"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_calcrate_old: "SUM(old.calculateintrate)"
+      val_calcrate_new: "SUM(new.calculateintrate)"
+      val_old_n: "COUNT(old)"
+      val_new_n: "COUNT(new)"
+    condition: "val_old_n <= 0 || val_new_n <= 0 || Math.abs(val_calcrate_old / val_old_n - val_calcrate_new / val_new_n) <= 0.0001"
+    error_message: >
+      calculateintrate mismatch: old avg={val_calcrate_old}/{val_old_n}, new avg={val_calcrate_new}/{val_new_n}.
+      Calculated interest rate was not correctly migrated for this group.
+
+  # -------------------------------------------------------
+  # Step 9: calprovisionamount — Provision amount (constant per sysref group)
+  # -------------------------------------------------------
+  - step: "9"
+    check_type: ROW_LEVEL_COHESION
+    variables:
+      val_prov_old: "SUM(old.calprovisionamount)"
+      val_prov_new: "SUM(new.calprovisionamount)"
+      val_old_n: "COUNT(old)"
+      val_new_n: "COUNT(new)"
+    condition: "val_old_n <= 0 || val_new_n <= 0 || Math.abs(val_prov_old / val_old_n - val_prov_new / val_new_n) <= 0.01"
+    error_message: >
+      calprovisionamount mismatch: old avg={val_prov_old}/{val_old_n}, new avg={val_prov_new}/{val_new_n}.
+      Provision amount was not correctly migrated for this group.
