@@ -52,8 +52,9 @@ schema_mappings:
     - old: newaccountno
       new: lsaccountno
 
-    - old: loantransaction
-      new: loantranshostcode           # renamed
+    # NOTE: loantransaction→loantranshostcode EXCLUDED — migration adds a balancing I1/D entry
+    # (loantranshostcode=23000) for PSA/ADJ groups that doesn't exist in old. Distinct-set on
+    # new side picks up the extra code 23000 → false VALUE_MISMATCH on every affected group.
 
     - old: systemreferencenumber
       new: systemreferenceno           # group key, also mapped as orderno below
@@ -70,8 +71,7 @@ schema_mappings:
     - old: chargetype
       new: chargetype
 
-    - old: tellerid
-      new: tellerid
+    # NOTE: tellerid EXCLUDED — old stores a numeric code, new stores AD username. Always mismatches.
 
     - old: servicebranch
       new: servicebranch

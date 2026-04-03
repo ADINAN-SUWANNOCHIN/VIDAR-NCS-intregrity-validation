@@ -121,11 +121,17 @@ actions:
   # Step 6: Double-entry interest self-balance check
   # For every group with I1 rows, the H-table credit and debit
   # interest rows must carry equal amounts (balanced ledger).
+  #
+  # Guard: PSA/ADJ/ADJM prefix groups have their I1/C routed to
+  # ls$lshistinvtransactionhistory (non-H) instead of the H table.
+  # The H table only receives the I1/D side for these groups → the
+  # double-entry check would always fire a false positive.
   # -------------------------------------------------------
   - step: "6"
     check_type: ROW_LEVEL_COHESION
     trigger_condition:
       must_have_any: [I1]
+      groupkey_not_starts_with: [PSA, ADJ, ADJM]
     variables:
       val_credit: "SUM(new.lvcreditinterestamount)"
       val_debit: "SUM(new.lvdebitinterestamount)"

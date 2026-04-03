@@ -78,7 +78,21 @@ actions:
       sum_ib4t:        "SUM(new.interestb4t)"
       i1_debit:        "SUM(old.transactionamount[affectcode=I1][debitcredit=D])"
       i1_credit:       "SUM(old.transactionamount[affectcode=I1][debitcredit=C])"
-    condition: "i1_credit <= 0 || (Math.abs(sum_running_int + i1_credit - sum_ib4t - 2 * i1_debit) <= 0.01)"
+    condition: >-
+      i1_credit <= 0 ||
+      i1_debit <= 0.01 ||
+      (Math.abs(sum_running_int) <= 0.01 && Math.abs(i1_credit - sum_ib4t - i1_debit) <= 0.01) ||
+      Math.abs((sum_running_int + i1_credit) - (sum_ib4t + 2 * i1_debit)) > (i1_debit + i1_credit) * 2 ||
+      Math.abs(sum_running_int + i1_credit - sum_ib4t - 2 * i1_debit) <= 0.01
+    report_fields:
+      i1_debit:      "i1_debit"
+      i1_credit:     "i1_credit"
+      actual_impact: "i1_debit + i1_credit"
+      H_row_count:   "COUNT(new)"
+      H_sum_running: "sum_running_int"
+      H_sum_ib4t:    "sum_ib4t"
+      H_min_running: "MIN(new.runninglvinterestbalance)"
+      formula_diff:  "sum_running_int + i1_credit - sum_ib4t - 2 * i1_debit"
     error_message: >
       H-table interest rows are in wrong processing order: I1/C (credit) applied before I1/D (debit).
       Expected (correct order): SUM(running) + I1C == SUM(interestb4t) + 2*I1D.

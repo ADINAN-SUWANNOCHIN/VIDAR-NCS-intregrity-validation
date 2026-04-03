@@ -874,6 +874,11 @@ export class TransactionStrategy extends BaseStrategy {
   ): ValidationError[] {
     const errors: ValidationError[] = [];
 
+    // Normalize numeric strings before set comparison: old nvarchar may store decimals without
+    // leading zero ('.8', '-.19') while new decimal columns stringify as '0.8', '-0.19'.
+    // Number('.8') === Number('0.8') → normalize both sides to String(Number(v)) when finite.
+    const normalizeVal = (v: string): string => { const n = Number(v); return isFinite(n) ? String(n) : v; };
+
     for (const mapping of sm.exact_matches ?? []) {
       if (this.isNoisyType(noisyMap.get(mapping.old))) continue;
       // Fix 5: use distinct-value set comparison instead of SUM.
@@ -881,9 +886,9 @@ export class TransactionStrategy extends BaseStrategy {
       // when old has 1 row but new has N rows with the same value (row-split migration):
       //   SUM(old)=X vs SUM(new)=N*X → false mismatch even though all values equal X.
       // Distinct-set: {X} == {X} → correctly passes.
-      const oldVals = [...new Set(oldGroup.map((r) => String(r[mapping.old] ?? '').trim()))]
+      const oldVals = [...new Set(oldGroup.map((r) => normalizeVal(String(r[mapping.old] ?? '').trim())))]
         .filter((v) => v !== '').sort().join('|');
-      const newVals = [...new Set(newGroup.map((r) => String(r[mapping.new] ?? '').trim()))]
+      const newVals = [...new Set(newGroup.map((r) => normalizeVal(String(r[mapping.new] ?? '').trim())))]
         .filter((v) => v !== '').sort().join('|');
       if (oldVals !== '' && newVals !== '' && oldVals !== newVals) {
         errors.push({

@@ -268,6 +268,13 @@ export interface DefAction {
     groupkey_not_starts_with?: string[];
   };
   variables?: Record<string, string>;
+  /**
+   * Optional extra columns written to a per-def report file ({defId}_Detail.csv).
+   * Expressions use the same syntax as variables (SUM, MIN, COUNT) PLUS can reference
+   * already-resolved variable names and arithmetic on them.
+   * Only evaluated — and the report file only created — when the condition fails.
+   */
+  report_fields?: Record<string, string>;
   condition: string;
   error_message: string;
 }
@@ -313,4 +320,6 @@ export interface ValidationError {
   groupKey?: string;
   rowIdentifier?: string;
   message: string;
+  /** Resolved report_fields values — present only when the firing def action declares report_fields. */
+  reportFields?: Record<string, unknown>;
 }

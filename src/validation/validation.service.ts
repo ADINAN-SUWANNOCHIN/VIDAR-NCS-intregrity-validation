@@ -48,6 +48,8 @@ export class ValidationService {
 
     // Open detail log once — errors are flushed per-table then cleared from memory
     const { ws: detailWs, detailPath, jobDir } = this.reportService.openDetailLog(jobId);
+    // Per-def report streams — keyed by defId, opened on first error with reportFields
+    const defStreams = new Map<string, { ws: ReturnType<typeof this.reportService.openDefDetailStream>; path: string; columns: string[] }>();
     let reportPaths: string[] = [];
 
     try {
@@ -153,6 +155,20 @@ export class ValidationService {
 
       // Flush errors to detail log, then clear from memory (GC eligible)
       this.reportService.appendTableDetail(detailWs, tableResult);
+
+      // Stream per-def report rows for any errors that carry reportFields
+      for (const err of tableResult.errors) {
+        if (!err.reportFields || !err.defId) continue;
+        if (!defStreams.has(err.defId)) {
+          const columns = Object.keys(err.reportFields);
+          const defPath = `${jobDir}/${err.defId}_Detail.csv`;
+          const ws = this.reportService.openDefDetailStream(defPath, columns);
+          defStreams.set(err.defId, { ws, path: defPath, columns });
+        }
+        const ds = defStreams.get(err.defId)!;
+        this.reportService.appendDefDetailRow(ds.ws, ds.columns, tableResult.tableName, err);
+      }
+
       tableResult.errors = [];
 
       results.push(tableResult);
@@ -160,8 +176,20 @@ export class ValidationService {
       this.logger.log(`[Job:${jobId}] Table ${tableName} done: ${trueTotal} error(s) (stored ${errors.length})`);
     }
 
+    // ---- Close per-def streams and collect paths ----
+    const defPaths: string[] = [];
+    for (const [defId, ds] of defStreams) {
+      await new Promise<void>((resolve, reject) => {
+        ds.ws.end();
+        ds.ws.on('finish', resolve);
+        ds.ws.on('error', reject);
+      });
+      defPaths.push(ds.path);
+      this.logger.log(`[Job:${jobId}] ${defId}_Detail.csv written: ${ds.path}`);
+    }
+
     // ---- เขียน reports ----
-    reportPaths = await this.reportService.writeFinalReports(jobId, jobDir, detailPath, detailWs, results);
+    reportPaths = await this.reportService.writeFinalReports(jobId, jobDir, detailPath, detailWs, results, defPaths);
 
     } catch (err) {
       // Ensure detail stream is always closed even on unexpected error
