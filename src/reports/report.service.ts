@@ -136,26 +136,64 @@ export class ReportService {
     }
   }
 
-  /** Close the detail log and write the summary. Returns [summaryPath, detailPath]. */
+  /** Close the detail log and write the summary. Returns all report paths (summary + detail + per-def). */
   async writeFinalReports(
     jobId: string,
     jobDir: string,
     detailPath: string,
     detailWs: fs.WriteStream,
     results: TableResult[],
+    extraPaths?: string[],
   ): Promise<string[]> {
     await closeStream(detailWs);
     const summaryPath = path.join(jobDir, 'Summary_Report.csv');
     await this.writeSummary(summaryPath, jobId, results);
-    this.logger.log(`Reports written → ${summaryPath} | ${detailPath}`);
 
-    // Persist both files to PostgreSQL so they survive pod restarts
-    await Promise.all([
-      fs.promises.readFile(summaryPath).then((buf) => this.pg.saveReport(jobId, 'Summary_Report.csv', buf)),
-      fs.promises.readFile(detailPath).then((buf) => this.pg.saveReport(jobId, 'Detail_Log.csv', buf)),
-    ]).catch((e) => this.logger.warn(`[Reports] PG persist failed: ${e.message}`));
+    const allPaths = [summaryPath, detailPath, ...(extraPaths ?? [])];
+    this.logger.log(`Reports written → ${allPaths.join(' | ')}`);
 
-    return [summaryPath, detailPath];
+    // Persist all files to PostgreSQL so they survive pod restarts
+    await Promise.all(
+      allPaths.map((p) =>
+        fs.promises.readFile(p).then((buf) => this.pg.saveReport(jobId, path.basename(p), buf)),
+      ),
+    ).catch((e) => this.logger.warn(`[Reports] PG persist failed: ${e.message}`));
+
+    return allPaths;
+  }
+
+  // ----------------------------------------------------------------
+  // Per-def report API — one CSV per def rule that declares report_fields.
+  // The file is streamed row-by-row (same approach as Detail_Log).
+  // ----------------------------------------------------------------
+
+  /**
+   * Open a per-def detail stream.
+   * Writes the UTF-8 BOM and column header row, then returns the stream for row appending.
+   */
+  openDefDetailStream(filePath: string, columns: string[]): fs.WriteStream {
+    const ws = fs.createWriteStream(filePath, { encoding: 'utf8' });
+    ws.write('\uFEFF');
+    ws.write(csvRow(['Rule', 'Group Key', ...columns]));
+    return ws;
+  }
+
+  /**
+   * Append one row to a per-def detail stream.
+   * Columns must match the order used in openDefDetailStream.
+   */
+  appendDefDetailRow(
+    ws: fs.WriteStream,
+    columns: string[],
+    tableName: string,
+    err: ValidationError,
+  ): void {
+    const fields = err.reportFields ?? {};
+    ws.write(csvRow([
+      tableName,
+      err.groupKey ?? '',
+      ...columns.map((c) => (fields[c] != null ? String(fields[c]) : '')),
+    ]));
   }
 
   // ----------------------------------------------------------------

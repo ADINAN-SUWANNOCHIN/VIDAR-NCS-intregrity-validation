@@ -67,8 +67,8 @@ schema_mappings:
     - old: chargetype
       new: chargetype
 
-    - old: tellerid
-      new: tellerid
+    # NOTE: tellerid EXCLUDED — H-table rows carry a different tellerid format than old conv rows
+    # (numeric code in old vs AD username in new). N:M distinct-set always mismatches per group.
 
     - old: servicebranch
       new: servicebranch
@@ -94,34 +94,14 @@ schema_mappings:
     - old: noofdays
       new: noofdays
 
-    # --- Format columns: direct pass-through from conv → H ---
-    - old: lsformatdiffincome
-      new: lsformatdiffincome
-
-    - old: lsformatbfaccint
-      new: lsformatbfaccint
-
-    - old: lsformattdrdiffincome
-      new: lsformattdrdiffincome
-
-    - old: lsformatmodifygainloss
-      new: lsformatmodifygainloss
-
-    - old: laformatbfaccint
-      new: laformatbfaccint
-
-    - old: laformatbfggpayment
-      new: laformatbfggpayment
-
-    - old: laformatcreditpp
-      new: laformatcreditpp
-
-    - old: laformatggpayment
-      new: laformatggpayment
-
-    - old: laformatsumintpayment
-      new: laformatsumintpayment
-
+    # NOTE: Format columns (lsformat*, laformat*) EXCLUDED from exact_matches.
+    # In the N:M H-table structure each old CONV row fans out to multiple H rows; only one H row
+    # per group carries each format value while the others are null. Distinct-set comparison on
+    # the new side picks up null → empty → skipped, but old side has the real value → mismatch.
+    # These columns are validated by def002 (format integrity check). No separate check needed.
+    # Excluded: lsformatdiffincome, lsformatbfaccint, lsformattdrdiffincome, lsformatmodifygainloss,
+    #           laformatbfaccint, laformatbfggpayment, laformatcreditpp, laformatggpayment,
+    #           laformatsumintpayment.
     # NOTE: laformatt9adjustpp is in old but NOT found in H columns — excluded
 
   transformed_matches:

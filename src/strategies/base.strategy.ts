@@ -436,17 +436,33 @@ export abstract class BaseStrategy {
       }
 
       if (!conditionMet) {
-        // Interpolate {var_name} placeholders in error_message with resolved values
+        // Interpolate {var_name} placeholders in error_message with resolved values.
+        // Matches any word-character variable name (not just val_ prefix).
         const interpolated = String(action.error_message ?? '').replace(
-          /\{(val_\w+)\}/g,
+          /\{(\w+)\}/g,
           (_, name) => (name in resolvedVars ? String(resolvedVars[name]) : `{${name}}`),
         );
-        errors.push({
+        const error: ValidationError = {
           errorType: 'DEFECT_VIOLATION',
           defId,
           groupKey,
           message: interpolated,
-        });
+        };
+
+        // Resolve report_fields if declared — attach to error for per-def CSV report
+        if (action.report_fields && Object.keys(action.report_fields).length > 0) {
+          const fields: Record<string, unknown> = {};
+          for (const [fieldName, fieldExpr] of Object.entries(action.report_fields as Record<string, string>)) {
+            try {
+              fields[fieldName] = this.resolveReportField(fieldExpr, resolvedVars, oldGroup, newGroup);
+            } catch {
+              fields[fieldName] = null;
+            }
+          }
+          error.reportFields = fields;
+        }
+
+        errors.push(error);
       }
     }
 
@@ -594,6 +610,18 @@ export abstract class BaseStrategy {
     if (/^COUNT\(old\)$/i.test(t)) return oldRows.length;
     if (/^COUNT\(new\)$/i.test(t)) return newRows.length;
 
+    // MIN(new.col) / MIN(old.col)
+    const newMinMatch = t.match(/^MIN\(new\.(\w+)\)$/i);
+    if (newMinMatch) {
+      const vals = newRows.map((r) => parseFloat(String(r[newMinMatch[1]] ?? '')) || 0);
+      return vals.length > 0 ? Math.min(...vals) : 0;
+    }
+    const oldMinMatch = t.match(/^MIN\(old\.(\w+)\)$/i);
+    if (oldMinMatch) {
+      const vals = oldRows.map((r) => parseFloat(String(r[oldMinMatch[1]] ?? '')) || 0);
+      return vals.length > 0 ? Math.min(...vals) : 0;
+    }
+
     throw new Error(
       `DEF rule expression not parseable: "${expr}" — ` +
       `supported: SUM(old.col), SUM(new.col), SUM(old.col[f1=v1][f2=v2]...), COUNT(old), COUNT(new)`,
@@ -648,6 +676,45 @@ export abstract class BaseStrategy {
       return !!new Function(`return (${expr});`)();
     } catch (e: any) {
       throw new Error(`DEF condition evaluation failed: "${condition}": ${e.message}`);
+    }
+  }
+
+  /**
+   * Resolves a single report_field expression to a value.
+   *
+   * Resolution order:
+   * 1. Try as a structural expression (SUM/MIN/COUNT — operates on rows).
+   * 2. Substitute already-resolved variable values, then evaluate as JS arithmetic.
+   *
+   * This lets report_fields reference variable names (e.g. "i1_debit") or
+   * arithmetic on them (e.g. "i1_debit + i1_credit") without re-declaring them.
+   */
+  protected resolveReportField(
+    expr: string,
+    resolvedVars: Record<string, number>,
+    oldRows: Record<string, unknown>[],
+    newRows: Record<string, unknown>[],
+  ): unknown {
+    const t = expr.trim();
+
+    // Try as a structural expression first (SUM, MIN, COUNT)
+    try {
+      return this.evaluateExpression(t, oldRows, newRows);
+    } catch {
+      // Not a structural expression — fall through to arithmetic
+    }
+
+    // Substitute resolved variable values, then evaluate as JS arithmetic
+    let substituted = t;
+    for (const [name, value] of Object.entries(resolvedVars)) {
+      substituted = substituted.replace(new RegExp(`\\b${name}\\b`, 'g'), String(value));
+    }
+
+    try {
+      // eslint-disable-next-line no-new-func
+      return new Function(`return (${substituted});`)() as number;
+    } catch {
+      return null;
     }
   }
 
